@@ -1,0 +1,2418 @@
+CREATE OR REPLACE TABLE `c360-yomna-pr-9eb8c6.cbm_churn_wish_list_koodo_churn_models.koodo_byod_validation_jan_2024` AS
+
+WITH
+  temp_product_instance_profl AS (
+  SELECT
+    CAST(bus_prod_instnc_id AS NUMERIC) AS bus_prod_instnc_id,
+    bacct_bus_bacct_num AS ban,
+    pi_prod_instnc_resrc_str AS subscriber_no,
+    UPPER(dvc_non_telus_ind) AS dvc_non_telus_ind,
+    RANK() OVER(PARTITION BY bacct_bus_bacct_num, pi_prod_instnc_resrc_str ORDER BY pi_actvn_ts DESC, bus_prod_instnc_id DESC) AS row_rank
+  FROM
+    `cio-datahub-enterprise-pr-183a.ent_cust_cust.bq_prod_instnc_snpsht`
+  WHERE
+    CAST(prod_instnc_ts AS DATE) = '2024-01-31'
+    AND bacct_brand_id = 3
+    AND UPPER(pi_prod_instnc_stat_cd) = 'A'
+    AND bus_prod_instnc_src_id = 130
+    AND UPPER(bacct_bacct_stat_cd) IN ('O',
+      'S')),
+
+
+  product_instance_profl AS (
+  SELECT
+    * EXCEPT (row_rank)
+  FROM
+    temp_product_instance_profl
+  WHERE
+    row_rank = 1),
+
+
+  prodinst_equip_profl_assn AS (
+  SELECT
+    bus_prod_instnc_id,
+    prod_equip_ser_num
+  FROM
+    `cio-datahub-enterprise-pr-183a.ent_cust_cust.bq_prod_instnc_equip_assn_snpsht`
+  WHERE
+    CAST(prod_instnc_equip_assn_ts AS DATE) = '2024-01-31'
+    AND UPPER(most_rcnt_ind) = 'Y'
+    AND bus_prod_instnc_src_id = 130 ),
+
+
+  product_equip_profl AS (
+  SELECT
+    prod_equip_ser_num
+  FROM
+    `cio-datahub-enterprise-pr-183a.ent_cust_cust.bq_prod_equip_snpsht`
+  WHERE
+    CAST(prod_equip_ts AS DATE) = '2024-01-31'
+    AND UPPER(prod_equip_typ_cd) = 'PCS_EQUIPMENT' ),
+
+
+  byod_y_customers AS (
+  SELECT
+    product_instance_profl.bus_prod_instnc_id,
+    product_instance_profl.ban,
+    product_instance_profl.subscriber_no,
+    product_instance_profl.dvc_non_telus_ind
+  FROM
+    product_instance_profl
+  JOIN
+    prodinst_equip_profl_assn
+  ON
+    prodinst_equip_profl_assn.bus_prod_instnc_id = product_instance_profl.bus_prod_instnc_id
+    AND product_instance_profl.dvc_non_telus_ind = 'N'
+  JOIN
+    product_equip_profl
+  ON
+    product_equip_profl.prod_equip_ser_num = prodinst_equip_profl_assn.prod_equip_ser_num ),
+
+
+  byod_n_customers AS (
+  SELECT
+    product_instance_profl.bus_prod_instnc_id,
+    product_instance_profl.ban,
+    product_instance_profl.subscriber_no,
+    product_instance_profl.dvc_non_telus_ind
+  FROM
+    product_instance_profl
+  JOIN
+    prodinst_equip_profl_assn
+  ON
+    prodinst_equip_profl_assn.bus_prod_instnc_id = product_instance_profl.bus_prod_instnc_id
+    AND product_instance_profl.dvc_non_telus_ind = 'Y' ),
+
+
+  byod_customers AS (
+  SELECT
+    *
+  FROM
+    byod_y_customers
+  UNION ALL
+  SELECT
+    *
+  FROM
+    byod_n_customers ),
+
+
+  active_customers AS (
+  SELECT
+    ban,
+    subscriber_no,
+    bus_prod_instnc_id AS prod_instnc_id
+  FROM
+    temp_product_instance_profl
+  WHERE
+    row_rank = 1 ),
+
+
+  temp_reward_account_information AS (
+  SELECT
+    subscn_id,
+    landing_create_ts,
+    SUM(CAST(currcy_bal_amt AS NUMERIC)) AS tab_bal,
+    RANK() OVER(PARTITION BY subscn_id ORDER BY landing_create_ts DESC) AS row_rank
+  FROM
+    `cio-datahub-enterprise-pr-183a.ent_cust_cust.bq_reward_account_information`
+  WHERE
+    CAST(landing_create_ts AS DATE) <= '2024-01-31'
+  GROUP BY
+    subscn_id,
+    landing_create_ts),
+
+
+  reward_account_information AS (
+  SELECT
+    subscn_id,
+    tab_bal
+  FROM
+    temp_reward_account_information
+  WHERE
+    row_rank = 1),
+
+
+  byod_active_customers AS (
+  SELECT
+    DISTINCT active_customers.ban,
+    active_customers.subscriber_no,
+    active_customers.prod_instnc_id,
+    CASE byod_customers.dvc_non_telus_ind
+      WHEN 'Y' THEN 'BYOD'
+      WHEN 'N' THEN 'MTM'
+    ELSE
+    'N/A'
+  END
+    AS subscription_type
+  FROM
+    active_customers
+  LEFT JOIN
+    byod_customers
+  ON
+    byod_customers.bus_prod_instnc_id = active_customers.prod_instnc_id
+    AND byod_customers.ban = active_customers.ban
+    AND byod_customers.subscriber_no = active_customers.subscriber_no),
+
+
+  koodo_churn_base AS ( -- Koodo Full Base Churn Scoring Base
+  SELECT
+    DISTINCT byod_active_customers.ban,
+    byod_active_customers.subscriber_no,
+    byod_active_customers.prod_instnc_id,
+    reward_account_information.tab_bal,
+  IF
+    (reward_account_information.tab_bal < 0, 'TAB', byod_active_customers.subscription_type) AS subscription_type
+  FROM
+    byod_active_customers
+  LEFT JOIN
+    reward_account_information
+  ON
+    reward_account_information.subscn_id = byod_active_customers.prod_instnc_id),
+
+
+  active_koodo_base AS ( -- Active Koodo Base for Feature Hub
+  SELECT
+    CAST(bacct_bus_bacct_num AS int64) AS ban,
+    pi_prod_instnc_resrc_str AS subscriber_no,
+    bus_prod_instnc_id AS prod_instance_id,
+    DATE(prod_instnc_ts) AS prod_instnc_dt,
+    ROW_NUMBER() OVER (PARTITION BY bacct_bus_bacct_num, pi_prod_instnc_resrc_str ORDER BY pi_actvn_ts DESC, bus_prod_instnc_id DESC) AS row_rank
+  FROM
+    `cio-datahub-enterprise-pr-183a.ent_cust_cust.bq_prod_instnc_snpsht`
+  WHERE
+    DATE(prod_instnc_ts) = '2024-01-31'
+    AND bacct_brand_id = 3
+    AND UPPER(pi_prod_instnc_stat_cd) = 'A'
+    AND UPPER(bacct_bacct_typ_cd) = 'I'
+    AND UPPER(bacct_bacct_subtyp_cd) = 'R'
+    AND UPPER(bacct_billg_mthd_cd) = 'POST'
+    AND bus_prod_instnc_src_id = 130
+    AND UPPER(bacct_bacct_stat_cd) IN ('O',
+      'S') ),
+
+
+  active_koodo_base_subs AS ( -- Active Koodo Base for Feature Hub (distinct subscriber numbers)
+  SELECT
+    DISTINCT ban,
+    subscriber_no
+  FROM
+    active_koodo_base
+  WHERE
+    row_rank = 1 ),
+
+      
+  active_koodo_base_bans AS ( -- Active Koodo Base for Feature Hub (distinct BANs)
+  SELECT
+    DISTINCT ban
+  FROM
+    active_koodo_base
+  WHERE
+    row_rank = 1 ),
+
+
+  arpu_var AS (
+  SELECT
+    CAST(bacct_num AS int64) AS ban,
+    CAST(subscr_num AS STRING) AS subscriber_no,
+    DATE(bill_dt) AS bill_dt,
+    (COALESCE(curr_varcharge_amt,0) - COALESCE(curr_cr_amt,0)) AS monthly_arpu,
+    (COALESCE(curr_rc_chrg_amt,0) - COALESCE(curr_cr_amt,0)) AS monthly_msf,
+    (COALESCE(curr_varcharge_amt,0) - COALESCE(curr_rc_chrg_amt,0)) AS overage,
+    (COALESCE(lcl_at_amt,0) + COALESCE(lcl_toll_amt,0) + COALESCE(lcl_ac_amt,0)) AS local_amt,
+    (COALESCE(rm_at_amt,0) + COALESCE(rm_toll_amt,0) + COALESCE(rm_ac_amt,0)) AS rm_amt,
+    ROW_NUMBER() OVER (PARTITION BY bacct_num, subscr_num ORDER BY bill_seq_num DESC) AS rank,
+    CAST(SUBSTR(FORMAT_DATE("%Y%m%d", CAST(bill_dt AS DATE)),1,6) AS int64) AS month
+  FROM
+    `cio-datahub-enterprise-pr-183a.ent_cust_bill.bq_wls_bill_subsc_dtl`
+  WHERE
+    brand_id=3
+    AND DATE(bill_dt) >= DATE_SUB('2024-01-31', INTERVAL 150 DAY)
+    AND DATE(bill_dt) <= '2024-01-31'),
+
+
+  temp_arpu_sub AS (
+  SELECT
+    ban,
+    subscriber_no,
+    CAST(ROUND(AVG(monthly_arpu),2) AS NUMERIC) AS arpu_3m_sub,
+    CAST(ROUND(AVG(monthly_msf),2) AS NUMERIC) AS msf_3m_sub,
+    CAST(ROUND(AVG(overage),2) AS NUMERIC) AS overage_3m_sub,
+    CAST(ROUND(AVG(local_amt),2) AS NUMERIC) AS local_amt_3m_sub,
+    CAST(ROUND(AVG(rm_amt),2) AS NUMERIC) AS rm_amt_3m_sub,
+    '2024-01-31' AS base_part_dt
+  FROM
+    arpu_var
+  WHERE
+    rank <= 3
+  GROUP BY
+    ban,
+    subscriber_no ),
+
+
+  arpu_sub AS ( -- Feature: arpu_sub
+  SELECT
+    a.*
+  FROM
+    temp_arpu_sub AS a
+  INNER JOIN
+    active_koodo_base_subs AS b
+  ON
+    a.ban=b.ban
+    AND a.subscriber_no=b.subscriber_no ),
+
+
+  bill_var AS (
+  SELECT
+    CAST(billg_acct_num AS int64) AS ban,
+    bill_seq_no,
+    DATE(bill_dt) AS bill_dt,
+    bacct_stat_cd,
+    prev_bal_amt,
+    pym_rcvd_amt,
+    tot_billd_chrg_amt,
+    past_due_amt,
+    late_pym_base_amt,
+    late_pym_chrg_amt,
+    curr_chrg_amt,
+    tot_due_amt,
+    actl_bal_amt,
+    billg_mthd_cd,
+    carry_ovr_ind,
+    grp_ind,
+    num_of_ctns,
+    ctns_num_hm_call_qty,
+    ctns_num_hm_mins_qty,
+    ctns_num_rm_call_qty,
+    ctns_num_rm_mins_qty,
+    icc_ind,
+    call_cir_svd_amt_air,
+    call_cir_svd_amt_toll,
+    ROW_NUMBER() OVER (PARTITION BY billg_acct_num ORDER BY bill_seq_no DESC) AS rank,
+    CAST(SUBSTR(FORMAT_DATE("%Y%m%d", CAST(bill_dt AS DATE)),1,6) AS int64) AS month
+  FROM
+    `cio-datahub-enterprise-pr-183a.ent_cust_bill.bq_wls_bill_dtl`
+  WHERE
+    brand_id=3
+    AND bacct_stat_cd IN ('O',
+      'S')
+    AND DATE(bill_dt) >= DATE_SUB('2024-01-31', INTERVAL 90 DAY)
+    AND DATE(bill_dt) <= '2024-01-31'),
+
+
+  bill_month AS (
+  SELECT
+    DISTINCT CAST(SUBSTR(FORMAT_DATE("%Y%m%d", CAST(bill_dt AS DATE)),1,6) AS int64) AS month
+  FROM
+    bill_var
+  ORDER BY
+    month DESC
+  LIMIT
+    2 ),
+
+
+  temp_bill_ban AS (
+  SELECT
+    ban,
+    bill_seq_no,
+    bacct_stat_cd,
+    prev_bal_amt,
+    pym_rcvd_amt,
+    tot_billd_chrg_amt,
+    past_due_amt,
+    late_pym_base_amt,
+    late_pym_chrg_amt,
+    curr_chrg_amt,
+    tot_due_amt,
+    actl_bal_amt,
+    billg_mthd_cd,
+    carry_ovr_ind,
+    grp_ind,
+    num_of_ctns,
+    ctns_num_hm_call_qty,
+    ctns_num_hm_mins_qty,
+    ctns_num_rm_call_qty,
+    ctns_num_rm_mins_qty,
+    icc_ind,
+    call_cir_svd_amt_air,
+    call_cir_svd_amt_toll,
+    '2024-01-31' AS base_part_dt
+  FROM
+    bill_var
+  WHERE
+    rank=1
+    AND month IN (
+    SELECT
+      month
+    FROM
+      bill_month) ),
+
+      
+  bill_ban AS ( -- Feature: bill_ban
+  SELECT
+    a.*
+  FROM
+    temp_bill_ban AS a
+  INNER JOIN
+    active_koodo_base_bans AS b
+  ON
+    a.ban=b.ban),
+
+
+  bill_sub_var AS (
+  SELECT
+    CAST(bacct_num AS int64) AS ban,
+    CAST(subscr_num AS STRING) AS subscriber_no,
+    DATE(bill_dt) AS bill_dt,
+    COALESCE(curr_varcharge_amt,0) AS curr_varcharge_amt,
+    COALESCE(curr_cr_amt,0) AS curr_cr_amt,
+    COALESCE(curr_rc_chrg_amt,0) AS curr_rc_chrg_amt,
+    COALESCE(lcl_at_amt,0) AS lcl_at_amt,
+    COALESCE(lcl_toll_amt,0) AS lcl_toll_amt,
+    COALESCE(lcl_ac_amt,0) AS lcl_ac_amt,
+    COALESCE(rm_at_amt,0) AS rm_at_amt,
+    COALESCE(rm_toll_amt,0) AS rm_toll_amt,
+    COALESCE(rm_ac_amt,0) AS rm_ac_amt,
+    oth_call_amt,
+    bill_seq_num,
+    pac_ind,
+    tax_gst_amt,
+    tax_pst_amt,
+    tax_hst_amt,
+    tax_rm_amt,
+    tax_gst_exmp_ind,
+    tax_pst_exmp_ind,
+    tax_hst_exmp_ind,
+    tax_rm_exmp_ind,
+    cmit_ren_cd,
+    curr_oc_chrg_amt,
+    tot_billd_varcharge_amt,
+    tot_billd_adj_amt,
+    ctn_num_hm_call_cnt,
+    ctn_num_hm_mins_cnt,
+    ctn_num_rm_call_cnt,
+    ctn_num_rm_mins_cnt,
+    ctn_num_of_ld_mins_cnt,
+    ixc_cd,
+    pp_rplcmt_cd,
+    equip_typ_cd,
+    artm_min_used_qty,
+    inc_artm_min_used_qty,
+    tot_artm_amt,
+    sys_acc_fee_amt,
+    fee_911_amt,
+    call_cir_svd_air_amt,
+    call_cir_svd_toll_amt,
+    ROW_NUMBER() OVER (PARTITION BY bacct_num, subscr_num ORDER BY bill_seq_num DESC) AS rank,
+    CAST(SUBSTR(FORMAT_DATE("%Y%m%d", CAST(bill_dt AS DATE)),1,6) AS int64) AS month
+  FROM
+    `cio-datahub-enterprise-pr-183a.ent_cust_bill.bq_wls_bill_subsc_dtl`
+  WHERE
+    brand_id=3
+    AND DATE(bill_dt) >= DATE_SUB('2024-01-31', INTERVAL 90 DAY)
+    AND DATE(bill_dt) <= '2024-01-31'),
+
+
+  bill_sub_month AS (
+  SELECT
+    DISTINCT CAST(SUBSTR(FORMAT_DATE("%Y%m%d", CAST(bill_dt AS DATE)),1,6) AS int64) AS month
+  FROM
+    bill_sub_var
+  ORDER BY
+    month DESC
+  LIMIT
+    2 ),
+
+
+  temp_bill_sub AS (
+  SELECT
+    ban,
+    subscriber_no,
+    bill_dt,
+    curr_varcharge_amt,
+    curr_cr_amt,
+    curr_rc_chrg_amt,
+    lcl_at_amt,
+    lcl_toll_amt,
+    lcl_ac_amt,
+    rm_at_amt,
+    rm_toll_amt,
+    rm_ac_amt,
+    oth_call_amt,
+    bill_seq_num,
+    pac_ind,
+    tax_gst_amt,
+    tax_pst_amt,
+    tax_hst_amt,
+    tax_rm_amt,
+    tax_gst_exmp_ind,
+    tax_pst_exmp_ind,
+    tax_hst_exmp_ind,
+    tax_rm_exmp_ind,
+    cmit_ren_cd,
+    curr_oc_chrg_amt,
+    tot_billd_varcharge_amt,
+    tot_billd_adj_amt,
+    ctn_num_hm_call_cnt,
+    ctn_num_hm_mins_cnt,
+    ctn_num_rm_call_cnt,
+    ctn_num_rm_mins_cnt,
+    ctn_num_of_ld_mins_cnt,
+    ixc_cd,
+    pp_rplcmt_cd,
+    equip_typ_cd,
+    artm_min_used_qty,
+    inc_artm_min_used_qty,
+    tot_artm_amt,
+    sys_acc_fee_amt,
+    fee_911_amt,
+    call_cir_svd_air_amt,
+    call_cir_svd_toll_amt,
+    (curr_varcharge_amt - curr_cr_amt) AS monthly_arpu,
+    (curr_varcharge_amt - curr_rc_chrg_amt) AS overage,
+    (lcl_at_amt + lcl_toll_amt + lcl_ac_amt) AS local_amt,
+    (rm_at_amt + rm_toll_amt + rm_ac_amt) AS rm_amt,
+  IF
+    (oth_call_amt < 0, 0, oth_call_amt) AS other_call_amount_above_zero,
+    (curr_rc_chrg_amt - curr_cr_amt) AS curr_rc_chrg_amt_adj,
+    '2024-01-31' AS base_part_dt
+  FROM
+    bill_sub_var
+  WHERE
+    rank=1
+    AND month IN (
+    SELECT
+      month
+    FROM
+      bill_sub_month) ),
+
+      
+  bill_sub AS ( -- Feature: bill_sub
+  SELECT
+    a.*
+  FROM
+    temp_bill_sub AS a
+  INNER JOIN
+    active_koodo_base_subs AS b
+  ON
+    a.ban=b.ban
+    AND a.subscriber_no=b.subscriber_no),
+
+
+  clickstream_var AS (
+  SELECT
+    COALESCE( EVAR29_TXT, POST_EVAR29_TXT, UUID ) AS UUID,
+    CASE
+      WHEN LOWER(pg_nm) LIKE "shop/plans" THEN 1
+    ELSE
+    0
+  END
+    AS clk_shopplan,
+    CASE
+      WHEN LOWER(pg_nm) LIKE "shop/setup" THEN 1
+    ELSE
+    0
+  END
+    AS clk_shopsetup,
+    CASE
+      WHEN LOWER(pg_nm) LIKE "shop/phones" THEN 1
+    ELSE
+    0
+  END
+    AS clk_shopphone,
+    CASE
+      WHEN LOWER(pg_nm) LIKE "shop/easy-roam" THEN 1
+    ELSE
+    0
+  END
+    AS clk_shopezr,
+    CASE
+      WHEN LOWER(pg_nm) LIKE "shop/add-ons" THEN 1
+    ELSE
+    0
+  END
+    AS clk_shopaddon,
+    CASE
+      WHEN LOWER(pg_nm) LIKE "shop/payperuse" THEN 1
+    ELSE
+    0
+  END
+    AS clk_shopppu,
+    CASE
+      WHEN LOWER(pg_nm) LIKE "shop/tablets" THEN 1
+    ELSE
+    0
+  END
+    AS clk_shoptablet,
+    CASE
+      WHEN LOWER(pg_nm) LIKE "shop/add-a-line" THEN 1
+    ELSE
+    0
+  END
+    AS clk_shopaal,
+    CASE
+      WHEN LOWER(pg_nm) LIKE "shop/pickyourperk" THEN 1
+    ELSE
+    0
+  END
+    AS clk_shoppyp,
+    CASE
+      WHEN LOWER(pg_nm) LIKE "shop/security" THEN 1
+    ELSE
+    0
+  END
+    AS clk_shopsecurity,
+    CASE
+      WHEN LOWER(pg_nm) LIKE "shop/checkout" THEN 1
+    ELSE
+    0
+  END
+    AS clk_shopcheckout,
+    CASE
+      WHEN LOWER(pg_nm) LIKE "shop/homepage" THEN 1
+    ELSE
+    0
+  END
+    AS clk_shophomepage,
+    CASE
+      WHEN LOWER(pg_nm) LIKE "shop/streamplus" THEN 1
+    ELSE
+    0
+  END
+    AS clk_shopstrmpls,
+    CASE
+      WHEN LOWER(pg_nm) LIKE "shop/certified-pre-owned" THEN 1
+    ELSE
+    0
+  END
+    AS clk_shopcpo,
+    CASE
+      WHEN LOWER(pg_nm) LIKE "shop/bring-your-own-phone" THEN 1
+    ELSE
+    0
+  END
+    AS clk_shopbyod,
+    CASE
+      WHEN LOWER(pg_nm) LIKE "shop/tablet-rate-plans" THEN 1
+    ELSE
+    0
+  END
+    AS clk_shoptabletrp,
+    CASE
+      WHEN LOWER(pg_nm) LIKE "shop/configuration" THEN 1
+    ELSE
+    0
+  END
+    AS clk_shopconfiguration,
+    CASE
+      WHEN ((LOWER(pg_nm) LIKE "shop/cart") OR (LOWER(pg_nm) LIKE "%%cart%%")) THEN 1
+    ELSE
+    0
+  END
+    AS clk_cart,
+    CASE
+      WHEN LOWER(pg_nm) LIKE "my account/tab" THEN 1
+    ELSE
+    0
+  END
+    AS clk_tab,
+    CASE
+      WHEN LOWER(pg_nm) LIKE "my account/usage" THEN 1
+    ELSE
+    0
+  END
+    AS clk_usage,
+    CASE
+      WHEN LOWER(pg_nm) LIKE "my account/billing" THEN 1
+    ELSE
+    0
+  END
+    AS clk_billing,
+    CASE
+      WHEN LOWER(pg_nm) LIKE "my account/profile" THEN 1
+    ELSE
+    0
+  END
+    AS clk_profile,
+    CASE
+      WHEN LOWER(pg_nm) LIKE "my-account/payment" THEN 1
+    ELSE
+    0
+  END
+    AS clk_payment,
+    CASE
+      WHEN LOWER(pg_nm) LIKE "my account/phone services" THEN 1
+    ELSE
+    0
+  END
+    AS clk_service,
+    CASE
+      WHEN LOWER(pg_nm) LIKE "my account/profile/address change" THEN 1
+    ELSE
+    0
+  END
+    AS clk_adrschange,
+    CASE
+      WHEN LOWER(pg_nm) LIKE "my account/phone services/find number or port in" THEN 1
+    ELSE
+    0
+  END
+    AS clk_port,
+    CASE
+      WHEN LOWER(pg_nm) LIKE "my account/phone services/suspend device/step 1 review" THEN 1
+    ELSE
+    0
+  END
+    AS clk_suspenddevice_step1review,
+    CASE
+      WHEN LOWER(pg_nm) LIKE "my account/phone services/suspend device/step 2 complete" THEN 1
+    ELSE
+    0
+  END
+    AS clk_suspenddevice_step2done,
+    CASE
+      WHEN LOWER(pg_nm) LIKE "my account/phone services/current plan/find number/step 4 done" THEN 1
+    ELSE
+    0
+  END
+    AS clk_phoneservices_currentplan_findnumber_step4done,
+    CASE
+      WHEN LOWER(pg_nm) LIKE "my account/phone services/current plan/find number/step 3 review" THEN 1
+    ELSE
+    0
+  END
+    AS clk_phoneservices_currentplan_findnumber_step3review,
+    CASE
+      WHEN LOWER(pg_nm) LIKE "my account/phone services/current plan/find number/step 1 choose city" THEN 1
+    ELSE
+    0
+  END
+    AS clk_phoneservices_currentplan_findnumber_step1choosecity,
+    CASE
+      WHEN LOWER(pg_nm) LIKE "my account/phone services/current plan/find number/step 2 choose number" THEN 1
+    ELSE
+    0
+  END
+    AS clk_phoneservices_currentplan_findnumber_step2choosenumber,
+    CASE
+      WHEN LOWER(pg_nm) LIKE "help/articles" THEN 1
+    ELSE
+    0
+  END
+    AS clk_helparticles,
+    CASE
+      WHEN LOWER(pg_nm) LIKE "help/articles/easy-roam" THEN 1
+    ELSE
+    0
+  END
+    AS clk_helpezr,
+    CASE
+      WHEN LOWER(pg_nm) LIKE "help/landing page" THEN 1
+    ELSE
+    0
+  END
+    AS clk_helplandingpg,
+    CASE
+      WHEN LOWER(pg_nm) LIKE "help/articles/refer-friend" THEN 1
+    ELSE
+    0
+  END
+    AS clk_helpraf,
+    CASE
+      WHEN LOWER(pg_nm) LIKE "help/articles/stream-plus" THEN 1
+    ELSE
+    0
+  END
+    AS clk_helpstrmpls,
+    CASE
+      WHEN LOWER(pg_nm) LIKE "help/trouble shooting" THEN 1
+    ELSE
+    0
+  END
+    AS clk_helptroublesht,
+    CASE
+      WHEN LOWER(pg_nm) LIKE "help/articles/charges-explained" THEN 1
+    ELSE
+    0
+  END
+    AS clk_helpcharge,
+    CASE
+      WHEN LOWER(pg_nm) LIKE "help/articles/long-distance-calling" THEN 1
+    ELSE
+    0
+  END
+    AS clk_helpldcall,
+    CASE
+      WHEN LOWER(pg_nm) LIKE "help/articles/changing-your-rate-plan" THEN 1
+    ELSE
+    0
+  END
+    AS clk_helpplan,
+    CASE
+      WHEN LOWER(pg_nm) LIKE "help/articles/changing-your-address" THEN 1
+    ELSE
+    0
+  END
+    AS clk_helpchngaddr,
+    CASE
+      WHEN LOWER(pg_nm) LIKE "help/articles/things-know-about-cancelling-koodo" THEN 1
+    ELSE
+    0
+  END
+    AS clk_helpcancel,
+    CASE
+      WHEN LOWER(pg_nm) LIKE "help/articles/everything-you-need-to-know-about-tab" THEN 1
+    ELSE
+    0
+  END
+    AS clk_helptab,
+    CASE
+      WHEN LOWER(pg_nm) LIKE "help/articles/keeping-your-account-open-when-travelling" THEN 1
+    ELSE
+    0
+  END
+    AS clk_helptravel,
+    CASE
+      WHEN LOWER(pg_nm) LIKE "%%deals%%" THEN 1
+    ELSE
+    0
+  END
+    AS clk_deals,
+    CASE
+      WHEN LOWER(pg_nm) LIKE "%%unlock%%" THEN 1
+    ELSE
+    0
+  END
+    AS clk_unlock,
+    CASE
+      WHEN LOWER(pg_nm) LIKE "%%/phones/%%" THEN 1
+    ELSE
+    0
+  END
+    AS clk_phones,
+    CASE
+      WHEN LOWER(pg_nm) LIKE "%%/rate-plans%%" THEN 1
+    ELSE
+    0
+  END
+    AS clk_rateplans,
+    CASE
+      WHEN LOWER(pg_nm) LIKE "%%accessories%%" THEN 1
+    ELSE
+    0
+  END
+    AS clk_accessories,
+    CASE
+      WHEN LOWER(pg_nm) LIKE "%%refer%%friend%%" THEN 1
+    ELSE
+    0
+  END
+    AS clk_referfriend,
+    CASE
+      WHEN LOWER(pg_nm) LIKE "%%switch%%account%%" THEN 1
+    ELSE
+    0
+  END
+    AS clk_switchaccount,
+    CASE
+      WHEN ((LOWER(pg_nm) LIKE "%%help%%alcatel%%") OR (LOWER(pg_nm) LIKE "%%help%%iphone%%") OR (LOWER(pg_nm) LIKE "%%help%%lg%%") OR (LOWER(pg_nm) LIKE "%%help%%motorola%%") OR (LOWER(pg_nm) LIKE "%%help%%nexus%%") OR (LOWER(pg_nm) LIKE "%%help%%samsung%%") OR (LOWER(pg_nm) LIKE "%%help%%phone%%troubleshooting%%")) THEN 1
+    ELSE
+    0
+  END
+    AS clk_helpphone,
+    DATE(clckstrm_event_ts ) AS event_dt
+  FROM
+    `cio-datahub-enterprise-pr-183a.ent_cust_intractn.bq_clckstrm_koodo_web_event`
+  WHERE
+    DATE(clckstrm_event_ts) >= DATE_SUB('2024-01-31', INTERVAL 90 DAY)
+    AND DATE(clckstrm_event_ts) <= '2024-01-31'
+    AND uuid != 'n/avail'
+    AND pg_nm IS NOT NULL ),
+
+
+  clickstream_sum AS (
+  SELECT
+    UUID,
+    SUM(clk_shopplan) AS clk_shopplan,
+    SUM(clk_shopsetup) AS clk_shopsetup,
+    SUM(clk_shopphone) AS clk_shopphone,
+    SUM(clk_shopezr) AS clk_shopezr,
+    SUM(clk_shopaddon) AS clk_shopaddon,
+    SUM(clk_shopppu) AS clk_shopppu,
+    SUM(clk_shoptablet) AS clk_shoptablet,
+    SUM(clk_shopaal) AS clk_shopaal,
+    SUM(clk_shoppyp) AS clk_shoppyp,
+    SUM(clk_shopsecurity) AS clk_shopsecurity,
+    SUM(clk_shopcheckout) AS clk_shopcheckout,
+    SUM(clk_shophomepage) AS clk_shophomepage,
+    SUM(clk_shopstrmpls) AS clk_shopstrmpls,
+    SUM(clk_shopcpo) AS clk_shopcpo,
+    SUM(clk_shopbyod) AS clk_shopbyod,
+    SUM(clk_shoptabletrp) AS clk_shoptabletrp,
+    SUM(clk_shopconfiguration) AS clk_shopconfiguration,
+    SUM(clk_cart) AS clk_cart,
+    SUM(clk_tab) AS clk_tab,
+    SUM(clk_usage) AS clk_usage,
+    SUM(clk_billing) AS clk_billing,
+    SUM(clk_profile) AS clk_profile,
+    SUM(clk_payment) AS clk_payment,
+    SUM(clk_service) AS clk_service,
+    SUM(clk_adrschange) AS clk_adrschange,
+    SUM(clk_port) AS clk_port,
+    SUM(clk_suspenddevice_step1review) AS clk_suspenddevice_step1review,
+    SUM(clk_suspenddevice_step2done) AS clk_suspenddevice_step2done,
+    SUM(clk_phoneservices_currentplan_findnumber_step4done) AS clk_phoneservices_currentplan_findnumber_step4done,
+    SUM(clk_phoneservices_currentplan_findnumber_step3review) AS clk_phoneservices_currentplan_findnumber_step3review,
+    SUM(clk_phoneservices_currentplan_findnumber_step1choosecity) AS clk_phoneservices_currentplan_findnumber_step1choosecity,
+    SUM(clk_phoneservices_currentplan_findnumber_step2choosenumber) AS clk_phoneservices_currentplan_findnumber_step2choosenumber,
+    SUM(clk_helparticles) AS clk_helparticles,
+    SUM(clk_helpezr) AS clk_helpezr,
+    SUM(clk_helplandingpg) AS clk_helplandingpg,
+    SUM(clk_helpraf) AS clk_helpraf,
+    SUM(clk_helpstrmpls) AS clk_helpstrmpls,
+    SUM(clk_helptroublesht) AS clk_helptroublesht,
+    SUM(clk_helpcharge) AS clk_helpcharge,
+    SUM(clk_helpldcall) AS clk_helpldcall,
+    SUM(clk_helpplan) AS clk_helpplan,
+    SUM(clk_helpchngaddr) AS clk_helpchngaddr,
+    SUM(clk_helpcancel) AS clk_helpcancel,
+    SUM(clk_helptab) AS clk_helptab,
+    SUM(clk_helptravel) AS clk_helptravel,
+    SUM(clk_deals) AS clk_deals,
+    SUM(clk_unlock) AS clk_unlock,
+    SUM(clk_phones) AS clk_phones,
+    SUM(clk_rateplans) AS clk_rateplans,
+    SUM(clk_accessories) AS clk_accessories,
+    SUM(clk_referfriend) AS clk_referfriend,
+    SUM(clk_switchaccount) AS clk_switchaccount,
+    SUM(clk_helpphone) AS clk_helpphone
+  FROM
+    clickstream_var
+  GROUP BY
+    UUID ),
+
+
+  uuid AS (
+  SELECT
+    DISTINCT snapshot_load_dt,
+    uuid_str AS uuid,
+    ban_list,
+    SPLIT(ban_list, ',')[
+  OFFSET
+    (0)] AS ban
+  FROM
+    `cio-datahub-enterprise-pr-183a.ent_party_identity.bq_uuid_ban_mapping_flat`
+  WHERE
+    DATE(snapshot_load_dt) = '2024-01-31'),
+
+
+  temp_clickstream AS (
+  SELECT
+    CAST(ban AS int64) AS ban,
+    clk_shopplan,
+    clk_shopsetup,
+    clk_shopphone,
+    clk_shopezr,
+    clk_shopaddon,
+    clk_shopppu,
+    clk_shoptablet,
+    clk_shopaal,
+    clk_shoppyp,
+    clk_shopsecurity,
+    clk_shopcheckout,
+    clk_shophomepage,
+    clk_shopstrmpls,
+    clk_shopcpo,
+    clk_shopbyod,
+    clk_shoptabletrp,
+    clk_shopconfiguration,
+    clk_cart,
+    clk_tab,
+    clk_usage,
+    clk_billing,
+    clk_profile,
+    clk_payment,
+    clk_service,
+    clk_adrschange,
+    clk_port,
+    clk_suspenddevice_step1review,
+    clk_suspenddevice_step2done,
+    clk_phoneservices_currentplan_findnumber_step4done,
+    clk_phoneservices_currentplan_findnumber_step3review,
+    clk_phoneservices_currentplan_findnumber_step1choosecity,
+    clk_phoneservices_currentplan_findnumber_step2choosenumber,
+    clk_helparticles,
+    clk_helpezr,
+    clk_helplandingpg,
+    clk_helpraf,
+    clk_helpstrmpls,
+    clk_helptroublesht,
+    clk_helpcharge,
+    clk_helpldcall,
+    clk_helpplan,
+    clk_helpchngaddr,
+    clk_helpcancel,
+    clk_helptab,
+    clk_helptravel,
+    clk_deals,
+    clk_unlock,
+    clk_phones,
+    clk_rateplans,
+    clk_accessories,
+    clk_referfriend,
+    clk_switchaccount,
+    clk_helpphone,
+    '2024-01-31' AS base_part_dt
+  FROM (
+    SELECT
+      a.*,
+      b.ban,
+      ROW_NUMBER() OVER (PARTITION BY ban) AS rank
+    FROM
+      clickstream_sum a
+    INNER JOIN
+      uuid b
+    ON
+      a.uuid=b.uuid )
+  WHERE
+    rank=1 ),
+
+
+  clickstream AS ( -- Feature: clickstream
+  SELECT
+    DISTINCT a.*
+  FROM
+    temp_clickstream AS a
+  INNER JOIN
+    active_koodo_base_bans AS b
+  ON
+    a.ban=b.ban),
+
+  
+  device_pip AS (
+  SELECT
+    CAST(bacct_bus_bacct_num AS int64) AS ban,
+    CAST(pi_prod_instnc_resrc_str AS STRING) AS subscriber_no,
+    LOWER(TRIM(dvc_prod_equip_catlg_cd)) AS device_product_equip_catlg
+  FROM
+    `cio-datahub-enterprise-pr-183a.ent_cust_cust.bq_prod_instnc_snpsht`
+  WHERE
+    DATE(prod_instnc_ts) = '2024-01-31'
+    AND bacct_brand_id = 3
+    AND UPPER(pi_prod_instnc_stat_cd) = 'A'
+    AND UPPER(bacct_bacct_typ_cd) = 'I'
+    AND UPPER(bacct_bacct_subtyp_cd) = 'R'
+    AND UPPER(bacct_billg_mthd_cd) = 'POST'
+    AND bus_prod_instnc_src_id = 130
+    AND UPPER(bacct_bacct_stat_cd) IN ('O',
+      'S') ),
+
+
+  equip AS (
+  SELECT
+    LOWER(TRIM(bus_prod_equip_catlg_itm_cd)) AS device_product_equip_catlg,
+    CASE
+      WHEN LOWER(prod_equip_grp_nm)LIKE '%samsung%' OR LOWER(prod_equip_grp_nm) LIKE 'ss %' OR LOWER(prod_equip_grp_nm) LIKE '%google%' OR LOWER(prod_equip_grp_nm) LIKE '%huawei%' OR LOWER(prod_equip_grp_nm) LIKE 'zte%' OR LOWER(prod_equip_grp_nm) LIKE '%alcatel%' OR LOWER(prod_equip_grp_nm) LIKE 'lg%' OR LOWER(prod_equip_grp_nm) LIKE 'gg%' OR LOWER(prod_equip_grp_nm) LIKE '%moto%' OR LOWER(prod_equip_grp_nm) LIKE '%htc%' OR LOWER(prod_equip_grp_nm) LIKE 'sonim xp8' OR LOWER(prod_equip_grp_nm) LIKE 'sonim xp7700' THEN 1
+    ELSE
+    0
+  END
+    AS Android_Ind,
+    CASE
+      WHEN LOWER(prod_equip_grp_nm) LIKE '%apple%' OR LOWER(prod_equip_grp_nm) LIKE '%iphone%' OR LOWER(prod_equip_grp_nm) LIKE '%ipad%' THEN 1
+    ELSE
+    0
+  END
+    AS Apple_Ind
+  FROM
+    `cio-datahub-enterprise-pr-183a.ent_cust_cust.bq_prod_equip_catlg`
+  WHERE
+    DATE(prod_equip_catlg_ts) = '2024-01-31'),
+
+
+  temp_device AS (
+  SELECT
+    a.ban,
+    a.subscriber_no,
+    b.Android_Ind,
+    b.Apple_Ind,
+    '2024-01-31' AS base_part_dt
+  FROM
+    device_pip a
+  LEFT JOIN
+    equip b
+  ON
+    a.device_product_equip_catlg=b.device_product_equip_catlg ),
+
+
+  device AS ( -- Feature: device
+  SELECT
+    a.*
+  FROM
+    temp_device AS a
+  INNER JOIN
+    active_koodo_base_subs AS b
+  ON
+    a.ban=b.ban
+    AND a.subscriber_no=b.subscriber_no),
+
+  
+  pip_var AS (
+  SELECT
+    CAST(bacct_bus_bacct_num AS int64) AS ban,
+    CAST(pi_prod_instnc_resrc_str AS STRING) AS subscriber_no,
+    pi_prod_instnc_stat_actvy_cd,
+    pi_stat_actvy_rsn_cd,
+    CAST(pi_cntrct_durtn_mth_qty AS NUMERIC) AS pi_cntrct_durtn_mth_qty,
+    pi_rev_band_cd,
+    pi_port_typ_cd,
+    pi_mgrt_typ_cd,
+    bacct_billg_cycl_cd,
+    bacct_bacct_stat_actvy_cd,
+    bacct_stat_actvy_rsn_cd,
+    bacct_gl_seg_cd,
+    bacct_pymt_mthd_cd,
+    bacct_auto_pymt_mthd_cd,
+    bacct_kb_auto_pymt_mthd_cd,
+    bacct_invc_suppress_cd,
+    bacct_manl_hndl_req_op_cd,
+    bacct_ebill_ind,
+    consldt_cust_pref_lang_cd,
+    pp_bus_pp_catlg_itm_cd,
+    dvc_non_telus_ind,
+    CAST(consldt_cust_cust_age_yr_qty AS NUMERIC) AS consldt_cust_cust_age_yr_qty,
+    consldt_cust_cr_val_cd,
+    bacct_delinq_ind,
+    bacct_billg_addr_prov_cd,
+    CAST(pi_req_dpst_amt AS NUMERIC) AS pi_req_dpst_amt,
+    CASE
+      WHEN pi_req_dpst_amt>0 AND pi_req_dpst_amt IS NOT NULL THEN 1
+    ELSE
+    0
+  END
+    AS having_deposit,
+    DATE_DIFF('2024-01-31', DATE(pi_cntrct_end_ts), day)+1 AS pi_cntrct_end_recency,
+    DATE_DIFF('2024-01-31', DATE(pi_resrc_str_chng_ts), day)+1 AS pi_resrc_str_chng_recency,
+    DATE_DIFF('2024-01-31', DATE(pi_actvn_ts), day)+1 AS pi_actvn_recency,
+    DATE_DIFF('2024-01-31', DATE(pi_curr_bacct_assn_ts), day)+1 AS pi_curr_bacct_assn_recency,
+    DATE_DIFF('2024-01-31', DATE(pi_prim_pp_sls_start_ts), day)+1 AS pi_prim_pp_sls_start_recency,
+    DATE_DIFF('2024-01-31', DATE(pi_cntrct_start_ts), day)+1 AS pi_cntrct_start_recency,
+    DATE_DIFF('2024-01-31', DATE(pi_port_ts), day)+1 AS pi_port_recency,
+    DATE_DIFF('2024-01-31', DATE(pi_mgrt_ts), day)+1 AS pi_mgrt_recency,
+    DATE_DIFF('2024-01-31', DATE(bacct_bacct_create_ts), day)+1 AS bacct_bacct_create_recency,
+    DATE_DIFF('2024-01-31', DATE(bacct_bacct_stat_ts), day)+1 AS bacct_bacct_stat_recency,
+    DATE_DIFF('2024-01-31', DATE(bacct_manl_hndl_eff_start_ts), day)+1 AS bacct_manl_hndl_eff_start_recency,
+    DATE_DIFF('2024-01-31', DATE(bacct_manl_hndl_eff_end_ts), day)+1 AS bacct_manl_hndl_eff_end_recency,
+    ROW_NUMBER() OVER (PARTITION BY bacct_bus_bacct_num ORDER BY pi_actvn_ts, bus_prod_instnc_id) AS rank,
+    '2024-01-31' AS base_part_dt
+  FROM
+    `cio-datahub-enterprise-pr-183a.ent_cust_cust.bq_prod_instnc_snpsht`
+  WHERE
+    DATE(prod_instnc_ts) = '2024-01-31'
+    AND bacct_brand_id = 3
+    AND UPPER(pi_prod_instnc_stat_cd) = 'A'
+    AND UPPER(bacct_bacct_typ_cd) = 'I'
+    AND UPPER(bacct_bacct_subtyp_cd) = 'R'
+    AND UPPER(bacct_billg_mthd_cd) = 'POST'
+    AND bus_prod_instnc_src_id = 130
+    AND UPPER(bacct_bacct_stat_cd) IN ('O',
+      'S') ),
+
+
+  primary_subscriber AS (
+  SELECT
+    ban,
+    subscriber_no,
+    1 AS is_primary_subscriber
+  FROM
+    pip_var
+  WHERE
+    rank = 1 ),
+
+
+  temp_pip AS (
+  SELECT
+    a.ban,
+    a.subscriber_no,
+    a.pi_prod_instnc_stat_actvy_cd,
+    a.pi_stat_actvy_rsn_cd,
+    a.pi_cntrct_durtn_mth_qty,
+    a.pi_rev_band_cd,
+    a.pi_port_typ_cd,
+    a.pi_mgrt_typ_cd,
+    a.bacct_billg_cycl_cd,
+    a.bacct_bacct_stat_actvy_cd,
+    a.bacct_stat_actvy_rsn_cd,
+    a.bacct_gl_seg_cd,
+    a.bacct_pymt_mthd_cd,
+    a.bacct_auto_pymt_mthd_cd,
+    a.bacct_kb_auto_pymt_mthd_cd,
+    a.bacct_invc_suppress_cd,
+    a.bacct_manl_hndl_req_op_cd,
+    a.bacct_ebill_ind,
+    a.consldt_cust_pref_lang_cd,
+    a.pp_bus_pp_catlg_itm_cd,
+    a.dvc_non_telus_ind,
+    a.consldt_cust_cust_age_yr_qty,
+    a.consldt_cust_cr_val_cd,
+    a.bacct_delinq_ind,
+    a.bacct_billg_addr_prov_cd,
+    a.pi_req_dpst_amt,
+    a.having_deposit,
+    a.pi_cntrct_end_recency,
+    a.pi_resrc_str_chng_recency,
+    a.pi_actvn_recency,
+    a.pi_curr_bacct_assn_recency,
+    a.pi_prim_pp_sls_start_recency,
+    a.pi_cntrct_start_recency,
+    a.pi_port_recency,
+    a.pi_mgrt_recency,
+    a.bacct_bacct_create_recency,
+    a.bacct_bacct_stat_recency,
+    a.bacct_manl_hndl_eff_start_recency,
+    a.bacct_manl_hndl_eff_end_recency,
+    b.is_primary_subscriber,
+    a.base_part_dt
+  FROM
+    pip_var a
+  LEFT JOIN
+    primary_subscriber b
+  ON
+    a.ban=b.ban
+    AND a.subscriber_no=b.subscriber_no ),
+
+
+  pip AS ( -- Feature: pip
+  SELECT
+    a.*
+  FROM
+    temp_pip AS a
+  INNER JOIN
+    active_koodo_base_subs AS b
+  ON
+    a.ban=b.ban
+    AND a.subscriber_no=b.subscriber_no),
+
+
+  ucir_var AS (
+  SELECT
+    CAST(bacct_bus_bacct_num AS int64) AS ban,
+    prod_instnc_resrc_str AS subscriber_no,
+    bacct_wls_bacct_urbn_rur_ind,
+    wls_data_usg_trend_cd,
+    prod_equip_grp_nm,
+    wls_data_plan_ind,
+    bacct_tv_bacct_city_load_ratio,
+    cp_wls_actv_prod_instnc_cnt,
+    CAST( snpsht_ts AS date) AS snpsht_ts,
+    bacct_bacct_mbl_srvc_cnt,
+    CAST(bacct_wls_bacct_non_mtm_sub_cnt AS NUMERIC) AS bacct_wls_bacct_non_mtm_sub_cnt,
+    CAST(bacct_wls_bacct_mtm_sub_cnt AS NUMERIC) AS bacct_wls_bacct_mtm_sub_cnt,
+    CAST(bacct_wls_stor_visit_cnt AS NUMERIC) AS bacct_wls_stor_visit_cnt,
+    cp_dnc_sms_ind,
+    cp_dnc_email_ind,
+    cp_cust_vip_ind,
+    cp_cust_emrgncy_ind,
+    curr_dvc_bal,
+    bacct_curr_dvc_bal,
+    feature_amt,
+    start_dvc_bal_amt,
+    curr_chrg_amt,
+    curr_cr_amt,
+    DATE_DIFF('2024-01-31', DATE(cp_dnc_email_eff_start_ts), day)+1 AS email_dnc_recency,
+    DATE_DIFF('2024-01-31', DATE(cp_dnc_sms_eff_start_ts), day)+1 AS sms_dnc_recency,
+    ROW_NUMBER() OVER(PARTITION BY bacct_bus_bacct_num ORDER BY snpsht_ts DESC) AS rank,
+    '2024-01-31' AS base_part_dt
+  FROM
+    `cio-datahub-enterprise-pr-183a.ent_cust_cust.bq_ucir_daily_mktg_profl_prod_instnc_snpsht`
+  WHERE
+    bacct_bacct_brand_id = 3
+    AND prod_instnc_stat_cd = 'A'
+    AND DATE(snpsht_ts) = '2024-01-31'),
+
+
+  temp_ucir AS (
+  SELECT
+    ban,
+    subscriber_no,
+    bacct_wls_bacct_urbn_rur_ind,
+    wls_data_usg_trend_cd,
+    prod_equip_grp_nm,
+    wls_data_plan_ind,
+    bacct_tv_bacct_city_load_ratio,
+    cp_wls_actv_prod_instnc_cnt,
+    bacct_bacct_mbl_srvc_cnt,
+    bacct_wls_bacct_non_mtm_sub_cnt,
+    bacct_wls_bacct_mtm_sub_cnt,
+    bacct_wls_stor_visit_cnt,
+    cp_dnc_sms_ind,
+    cp_dnc_email_ind,
+    cp_cust_vip_ind,
+    cp_cust_emrgncy_ind,
+    curr_dvc_bal,
+    bacct_curr_dvc_bal,
+    feature_amt,
+    start_dvc_bal_amt,
+    curr_chrg_amt,
+    curr_cr_amt,
+    email_dnc_recency,
+    sms_dnc_recency,
+    base_part_dt
+  FROM
+    ucir_var
+  WHERE
+    rank=1 ),
+
+
+  ucir AS ( -- Feature: ucir
+  SELECT
+    a.*
+  FROM
+    temp_ucir AS a
+  INNER JOIN
+    active_koodo_base_subs AS b
+  ON
+    a.ban =b.ban
+    AND a.subscriber_no=b.subscriber_no),
+
+
+  temp_wls_cancel AS (
+  SELECT
+    CAST(cfr_ban AS int64) AS ban,
+    CAST(cfr_subscriber_no AS STRING) AS subscriber_no,
+  FROM
+    `bi-srv-mobilityds-pr-80a48d.telus_nba.wls_subscriber_cancellation_orc`
+  WHERE
+    DATE(cfr_create_date) >= DATE_SUB('2024-01-31', INTERVAL 30 DAY)
+    AND DATE(cfr_create_date) <= '2024-01-31'),
+
+
+  wls_cancel AS ( -- Feature: wls_cancel
+  SELECT
+    a.ban,
+    COUNT(DISTINCT a.subscriber_no) AS cancelled_subscribers_count,
+    '2024-01-31' AS base_part_dt
+  FROM
+    temp_wls_cancel AS a
+  INNER JOIN
+    active_koodo_base_subs AS b
+  ON
+    a.ban=b.ban
+  GROUP BY
+    a.ban),
+
+
+  durations_sub AS (
+  SELECT
+    ban,
+    subscr_num AS subscriber_no,
+    COUNT(DISTINCT sess_id) AS call_count_s,
+    SUM(CAST(map_durtn_str[SAFE_OFFSET(0)].value AS NUMERIC)) AS Dial_Duration_s,
+    SUM(CAST(map_durtn_str[SAFE_OFFSET(1)].value AS NUMERIC)) AS Ring_Duration_s,
+    SUM(CAST(map_durtn_str[SAFE_OFFSET(2)].value AS NUMERIC)) AS Talk_Duration_s,
+    SUM(CAST(map_durtn_str[SAFE_OFFSET(3)].value AS NUMERIC)) AS Hold_Duration_s,
+    SUM(effort_durtn_sec_qty) AS effort_durtn_sec_qty_s,
+    AVG(CAST(map_durtn_str[SAFE_OFFSET(0)].value AS NUMERIC)) AS Dial_Duration_avg_s,
+    AVG(CAST(map_durtn_str[SAFE_OFFSET(1)].value AS NUMERIC)) AS Ring_Duration_avg_s,
+    AVG(CAST(map_durtn_str[SAFE_OFFSET(2)].value AS NUMERIC)) AS Talk_Duration_avg_s,
+    AVG(CAST(map_durtn_str[SAFE_OFFSET(3)].value AS NUMERIC)) AS Hold_Duration_avg_s
+  FROM
+    `cio-datahub-enterprise-pr-183a.ent_cust_intractn.bq_call_sess_sum`
+  WHERE
+    DATE(part_dt) >= DATE_SUB('2024-01-31', INTERVAL 30 DAY)
+    AND DATE(part_dt) <= '2024-01-31'
+  GROUP BY
+    ban,
+    subscriber_no),
+
+
+  temp_last_call_durations_sub AS (
+  SELECT
+    ban,
+    subscr_num AS subscriber_no,
+    CAST(map_durtn_str[SAFE_OFFSET(0)].value AS NUMERIC) AS Dial_Duration_last_s,
+    CAST(map_durtn_str[SAFE_OFFSET(1)].value AS NUMERIC) AS Ring_Duration_last_s,
+    CAST(map_durtn_str[SAFE_OFFSET(2)].value AS NUMERIC) AS Talk_Duration_last_s,
+    CAST(map_durtn_str[SAFE_OFFSET(3)].value AS NUMERIC) AS Hold_Duration_last_s,
+    effort_durtn_sec_qty AS effort_durtn_sec_qty_last_s,
+    ROW_NUMBER() OVER (PARTITION BY subscr_num ORDER BY intractn_event_ts DESC) AS rank
+  FROM
+    `cio-datahub-enterprise-pr-183a.ent_cust_intractn.bq_call_sess_sum`
+  WHERE
+    DATE(part_dt) >= DATE_SUB('2024-01-31', INTERVAL 30 DAY)
+    AND DATE(part_dt) <= '2024-01-31'),
+
+
+  last_call_durations_sub AS (
+  SELECT
+    ban,
+    subscriber_no,
+    Dial_Duration_last_s,
+    Ring_Duration_last_s,
+    Talk_Duration_last_s,
+    Hold_Duration_last_s,
+    effort_durtn_sec_qty_last_s
+  FROM
+    temp_last_call_durations_sub
+  WHERE
+    rank = 1 ),
+
+
+  queue_count_sub AS (
+  SELECT
+    ban,
+    subscr_num AS subscriber_no,
+    COUNT(DISTINCT queue) AS queue_count_sub
+  FROM
+    `cio-datahub-enterprise-pr-183a.ent_cust_intractn.bq_call_sess_sum`,
+    UNNEST(list_queue_nm) AS queue
+  WHERE
+    DATE(part_dt) >= DATE_SUB('2024-01-31', INTERVAL 30 DAY)
+    AND DATE(part_dt) <= '2024-01-31'
+    AND queue NOT IN ('NA',
+      'NONE')
+  GROUP BY
+    ban,
+    subscriber_no ),
+
+
+  temp_queue_features_sub AS (
+  SELECT
+    ban,
+    subscr_num AS subscriber_no,
+    queue,
+    CASE
+      WHEN TRIM(LOWER(queue)) IN ( 'vq_tel_ce_wls_postpaid_cr1_en', 'vq_cbc_tel_ce_wls_postpaid_cr1_en', 'vq_tel_ce_wls_training_2_cr1_en', 'vq_tel_ce_wls_postpaid_ts_en', 'vq_tel_ce_wls_cam_presusp_cr1_en', 'vq_tel_ce_wln_purefibre_cr1_en', 'vq_tel_ce_wls_training_1_cr1_en', 'vq_tel_ce_wls_chc_dlr_post_cr1_en', 'vq_tel_ce_wls_ab_cr2_en', 'vq_cbc_tel_ce_wls_postpaid_ts_en', 'vq_tel_ce_wls_helpdesk_cs_en', 'vq_tel_ce_wls_mob_home_cr1_en', 'vq_tel_ce_wls_bc_cr2_en', 'vq_tel_ce_wln_purefibre_cr2_en', 'vq_cbc_tel_ce_wls_mob_home_cr1_en', 'vq_tel_ce_wln_unidentified_cr1_en', 'vq_tel_ce_wln_copper_cr1_en', 'vq_tel_ce_wls_postpaid_cr1_fr', 'vq_tel_ce_wln_purefibre_tv_ts_en', 'vq_tel_ce_wls_on_cr2_en', 'vq_cbc_tel_ce_wls_training_2_cr1_en', 'vq_cbc_tel_ce_wls_postpaid_cr1_fr', 'vq_cbc_tel_ce_wln_purefibre_cr1_en', 'vq_tel_ce_wln_alarm_cr1_en', 'vq_tel_ce_wln_copper_cr2_en', 'vq_tel_ce_wls_crmt_cs_en', 'vq_tel_ce_wln_alarm_ts_en', 'vq_tel_ce_wln_unidentified_ts_en', 'vq_tel_ce_wln_alarm_cr2_en', 'vq_tel_ce_wln_pilot1_sales_en', 'vq_telus_bcx_wls_smbpcs_cr1_en', 'vq_cbc_tel_ce_wln_unidentified_cr1_en', 'vq_tel_ce_wln_cam_cr1_en', 'vq_cbc_tel_ce_wls_training_1_cr1_en', 'vq_tel_ce_wls_webstore_cr1_en', 'cq_tel_ce_wls_bc_cr1_en', 'vq_tel_ce_wln_purefibre_hsia_ts_en', 'cq_tel_ce_wls_ab_cr1_en', 'vq_tel_ce_wls_qsam_cr2_en', 'vq_tel_ce_wln_copper_hsia_ts_en', 'vq_tel_ce_wls_epp_cr1_en', 'vq_tel_ce_wls_qsam_cr2_fr', 'cq_tel_ce_wls_on_cr1_en', 'vq_tel_ce_wln_sales_en', 'vq_cbc_tel_ce_wln_copper_cr1_en' ) THEN 1
+    ELSE
+    0
+  END
+    AS queues_sub
+  FROM
+    `cio-datahub-enterprise-pr-183a.ent_cust_intractn.bq_call_sess_sum`,
+    UNNEST(list_queue_nm) AS queue
+  WHERE
+    DATE(part_dt) >= DATE_SUB('2024-01-31', INTERVAL 30 DAY)
+    AND DATE(part_dt) <= '2024-01-31'
+    AND queue NOT IN ('NA',
+      'NONE') ),
+
+
+  queue_features_sub AS (
+  SELECT
+    ban,
+    subscriber_no,
+    SUM(queues_sub) AS queues_sub
+  FROM
+    temp_queue_features_sub
+  GROUP BY
+    ban,
+    subscriber_no),
+
+
+  temp_call_recency_sub AS (
+  SELECT
+    ban,
+    subscr_num AS subscriber_no,
+    MAX(DATE(intractn_event_ts)) AS call_date
+  FROM
+    `cio-datahub-enterprise-pr-183a.ent_cust_intractn.bq_call_sess_sum`,
+    UNNEST(list_queue_nm) AS queue
+  WHERE
+    DATE(part_dt) >= DATE_SUB('2024-01-31', INTERVAL 30 DAY)
+    AND DATE(part_dt) <= '2024-01-31'
+  GROUP BY
+    ban,
+    subscriber_no ),
+
+
+  call_recency_sub AS (
+  SELECT
+    ban,
+    subscriber_no,
+    DATE_DIFF('2024-01-31', call_date, DAY) + 1 AS call_date_recency_sub
+  FROM
+    temp_call_recency_sub),
+
+
+  temp_ivr_nodes_features_sub AS (
+  SELECT
+    ban,
+    subscr_num AS subscriber_no,
+    ivr_nodes,
+    CASE
+      WHEN TRIM(LOWER(ivr_nodes)) IN ( 'wlsavaprequalifyresult', 'avainvocation', 'avainvoked', 'routingtargetdomain', 'omni3qualificationresult', 'omnicallbackcheckhobresult', 'calltransfer', 'wlsivrkey', 'ava.agentrequested', 'wlsavaqualifyresult', 'ava.intentdomain', 'language.preferred', 'playpretransferprompt', 'cbwaittime', 'preagentauthentication', 'cbmainmenu', 'wlnivrkey', 'cbsuccesscallback', 'wlnavaprequalifyresult', 'omnirouting.broadcast', 'cbconfirmcallbacknumber', 'solvatioqualifyresult', 'bansegmentsubsegment', 'wlnavaqualifyresult', 'post.ava.broadcast', 'unidentifiedomni1tnused', 'wls_ava_fallback_menu', 'hobclosed', 'wlsmainivronly', 'configivrdatacheck', 'resorbizonly', 'capturetn', 'cbconfirmcallbacknumber.choseani', 'wls_roaming_hi_en', 'clientcare.callback.success', 'cbmainmenuselfserve.chosecallback', 'cbconfirmcallbacknumber.entry', 'cbmainmenuselfserve.entry', 'tm.roammainnoopen', 'tm.othernparoaming', 'cbwaittime.onmedium', 'dealercorpmainmenu.channelcare', 'cbwaittime.announceonly', 'omnicallback.entry', 'cbwaittime.onhigh', 'account.personal', 'dealercorpmainmenu', 'tm.pcsmikemainmenu.choseagentdisambig', 'loyalty', 'wlnivrkeyfromcallback', 'tm.pcsmikemainmenu', 'authenticate.success', 'dealercorpmaingettn.inputtn', 'login.nomatch', 'cbexistingcallback', 'wlspaymentarrangement', 'repeatconfirmationnumber', 'client_care_menu', 'login.noinput', 'confirmpayment', 'authenticate.qualify', 'cdecallbacktokenretrieval', 'smsgenesys', 'confirmamount', 'networktype_hspa', 'creditcardready', 'cdecallbacktransactiontype', 'cdecallbacktype', 'cdesessionretrieval', 'channelcare.transfer', 'channelcare.pretransfer', 'confirmfullbalance', 'cdeivrtransferreason', 'cdesessionwrite', 'authenticate.failed.invalidpin', 'creditcardprocessing', 'login.getpassword', 'authenticate.failed.maxerror', 'dealercorpmaingettn', 'wirelessorwireline', 'login.getsalesrepcode', 'login.getdealercredentialsentry', 'cdeivrtransfer', 'channelcare_welcome', 'login.entry', 'login.getlogincode', 'getamount', 'ghostcalltrap', 'confirmpaymentcollections', 'collectionsstatuspreamble', 'collectionsmain', 'cberrortransferagent', 'getpin', 'havenumbermain', 'wirelineorwireless', 'routing.broadcast', 'clientcare.pretransfer', 'cbgettn', 'wln_direct_sales_tollfree', 'clientcare.transfer', 'sendsmspersonalizedprompt', 'authenticate.notqualify', 'abal.regular_success', 'abal.regular', 'abal', 'hangup', 'havenumberagentdisambig', 'cbmainmenuss', 'vhwaittime.vhoff.low', 'usemobilecontact', 'capturemobiletn', 'nonumbermain', 'optiondefault', 'accountbalance', 'enfrzhzalangmenu', 'abal.pinrequired.clientvalidated', 'language.entryconfig', 'abal.routing', 'unidentified.omni1.ani', 'captureban', 'resorbizorcorporepp', 'wgl.choseenglish', 'avagettn', 'abal.pinrequired.clientnotvalidated', 'smartaiisrecommended', 'wln_direct_adt_west', 'wgl.enfr.entry', 'crossivrtransfer', 'smartairecommendedqueuetype', 'confirmnotfoundtn', 'restoral.offer_from_topivr', 'custcontact.hangup', 'custcontact.dynamicurlsms.success' ) THEN 1
+    ELSE
+    0
+  END
+    AS ivr_nodes_sub
+  FROM
+    `cio-datahub-enterprise-pr-183a.ent_cust_intractn.bq_call_sess_sum`,
+    UNNEST(list_node_name_str) AS ivr_nodes
+  WHERE
+    DATE(part_dt) >= DATE_SUB('2024-01-31', INTERVAL 30 DAY)
+    AND DATE(part_dt) <= '2024-01-31'),
+
+
+  ivr_nodes_features_sub AS (
+  SELECT
+    ban,
+    subscriber_no,
+    SUM(ivr_nodes_sub) AS ivr_nodes_sub
+  FROM
+    temp_ivr_nodes_features_sub
+  GROUP BY
+    ban,
+    subscriber_no),
+
+
+  temp_result_gen_features_sub AS (
+  SELECT
+    ban,
+    subscr_num AS subscriber_no,
+    rslt_gen_txt,
+    CASE
+      WHEN TRIM(LOWER(rslt_gen_txt)) IN ( '-1 - customerabandoned - answeredbyother', '-1 - completed - unspecified', 'none - completed - unspecified', '-1 - customerabandoned - abandonedwhilequeued', 'none - customerabandoned - abandonedwhilequeued', 'no type - customerabandoned - answeredbyother', 'no type - completed - unspecified', 'no type - customerabandoned - abandonedwhilequeued', '225237 - completed - unspecified', '-1 - transferred - unspecified', '225237 - customerabandoned - abandonedwhilequeued', 'none - transferred - unspecified', 'inquire dispute or pay my bill - customerabandoned - answeredbyother', '-1 - customerabandoned - abandonedfromhold', '-1 - transferred - unspecified', '-1 - completed - unspecified', '225237 - customerabandoned - abandonedwhilequeued' ) THEN 1
+    ELSE
+    0
+  END
+    AS rslt_gen_txt_sub
+  FROM
+    `cio-datahub-enterprise-pr-183a.ent_cust_intractn.bq_call_sess_sum`
+  WHERE
+    DATE(part_dt) >= DATE_SUB('2024-01-31', INTERVAL 30 DAY)
+    AND DATE(part_dt) <= '2024-01-31'),
+
+
+  result_gen_features_sub AS (
+  SELECT
+    ban,
+    subscriber_no,
+    SUM(rslt_gen_txt_sub) AS rslt_gen_txt_sub
+  FROM
+    temp_result_gen_features_sub
+  GROUP BY
+    ban,
+    subscriber_no),
+
+
+  temp_result_ivr_features_sub AS (
+  SELECT
+    ban,
+    subscr_num AS subscriber_no,
+    rslt_ivr_txt,
+    CASE
+      WHEN TRIM(LOWER(rslt_ivr_txt)) IN ( 'success', 'hangup', 'call transfer success', 'call hang-up', 'call transfer hangup', 'smsnotification.success', 'systemhangup', 'call transfer success ,success' ) THEN 1
+    ELSE
+    0
+  END
+    AS rslt_ivr_txt_sub
+  FROM
+    `cio-datahub-enterprise-pr-183a.ent_cust_intractn.bq_call_sess_sum`
+  WHERE
+    DATE(part_dt) >= DATE_SUB('2024-01-31', INTERVAL 30 DAY)
+    AND DATE(part_dt) <= '2024-01-31'),
+
+
+  result_ivr_features_sub AS (
+  SELECT
+    ban,
+    subscriber_no,
+    SUM(rslt_ivr_txt_sub) AS rslt_ivr_txt_sub
+  FROM
+    temp_result_ivr_features_sub
+  GROUP BY
+    ban,
+    subscriber_no),
+
+
+  call_session_summary AS ( -- Feature: call_session_summary
+  SELECT
+    active_koodo_base_subs.ban,
+    active_koodo_base_subs.subscriber_no,
+    durations_sub.* EXCEPT (ban,
+      subscriber_no),
+    last_call_durations_sub.* EXCEPT (ban,
+      subscriber_no),
+    queue_count_sub.* EXCEPT (ban,
+      subscriber_no),
+    queue_features_sub.* EXCEPT (ban,
+      subscriber_no),
+    call_recency_sub.* EXCEPT (ban,
+      subscriber_no),
+    ivr_nodes_features_sub.* EXCEPT (ban,
+      subscriber_no),
+    result_gen_features_sub.* EXCEPT (ban,
+      subscriber_no),
+    result_ivr_features_sub.* EXCEPT (ban,
+      subscriber_no),
+  FROM
+    active_koodo_base_subs
+  LEFT JOIN
+    durations_sub
+  ON
+    durations_sub.ban = active_koodo_base_subs.ban
+    AND durations_sub.subscriber_no = active_koodo_base_subs.subscriber_no
+  LEFT JOIN
+    last_call_durations_sub
+  ON
+    last_call_durations_sub.ban = active_koodo_base_subs.ban
+    AND last_call_durations_sub.subscriber_no = active_koodo_base_subs.subscriber_no
+  LEFT JOIN
+    queue_count_sub
+  ON
+    queue_count_sub.ban = active_koodo_base_subs.ban
+    AND queue_count_sub.subscriber_no = active_koodo_base_subs.subscriber_no
+  LEFT JOIN
+    queue_features_sub
+  ON
+    queue_features_sub.ban = active_koodo_base_subs.ban
+    AND queue_features_sub.subscriber_no = active_koodo_base_subs.subscriber_no
+  LEFT JOIN
+    call_recency_sub
+  ON
+    call_recency_sub.ban = active_koodo_base_subs.ban
+    AND call_recency_sub.subscriber_no = active_koodo_base_subs.subscriber_no 
+  LEFT JOIN
+    ivr_nodes_features_sub
+  ON
+    ivr_nodes_features_sub.ban = active_koodo_base_subs.ban
+    AND ivr_nodes_features_sub.subscriber_no = active_koodo_base_subs.subscriber_no
+  LEFT JOIN
+    result_gen_features_sub
+  ON
+    result_gen_features_sub.ban = active_koodo_base_subs.ban
+    AND result_gen_features_sub.subscriber_no = active_koodo_base_subs.subscriber_no
+  LEFT JOIN
+    result_ivr_features_sub
+  ON
+    result_ivr_features_sub.ban = active_koodo_base_subs.ban
+    AND result_ivr_features_sub.subscriber_no = active_koodo_base_subs.subscriber_no ),
+
+
+  temp_css_vendor_call AS (
+  SELECT
+    CAST(bus_bacct_num AS INT64) AS ban,
+    CAST(primary_subscriber_num AS INT64) AS subscriber_no,
+    CAST(call_start_ts AS DATE) AS call_dt,
+    call_release_cd,
+    call_talk_sec_qty,
+    1 AS flag
+  FROM
+    `cio-datahub-enterprise-pr-183a.src_sas.bq_css_vendor_call`
+  WHERE
+    DATE(call_start_ts) >= DATE_SUB('2024-01-31', INTERVAL 30 DAY)
+    AND DATE(call_start_ts) < '2024-01-31'
+    AND DATE(data_ts) >= DATE_SUB('2024-01-31', INTERVAL 30 DAY)
+    AND DATE(data_ts) < '2024-01-31'),
+
+
+  all_calls_sub AS (
+  SELECT
+    CAST(ban AS INT64) AS ban,
+    CAST(subscriber_no AS INT64) AS subscriber_no,
+    SUM(flag) AS all_calls_sub,
+    SUM(call_talk_sec_qty) AS call_talk_sec_qty_tot_sub,
+    AVG(call_talk_sec_qty) AS call_talk_sec_qty_avg_sub,
+    MIN(call_talk_sec_qty) AS call_talk_sec_qty_min_sub,
+    MAX(call_talk_sec_qty) AS call_talk_sec_qty_max_sub
+  FROM
+    temp_css_vendor_call
+  GROUP BY
+    ban,
+    subscriber_no ),
+
+
+  ref_release_code AS (
+  SELECT
+    release_code_id AS call_release_cd,
+    release_code_desc,
+    ob_rpc,
+    ob_connect,
+    ob_contact,
+    CASE
+      WHEN UPPER(release_code_desc) LIKE '%%CALL BACK%%' THEN 'Y'
+    ELSE
+    'N'
+  END
+    AS call_back,
+    CASE
+      WHEN UPPER(release_code_desc) IN ('FAX', 'NO ANSWER', 'ANSWERING MACHINE') THEN 'Y'
+    ELSE
+    'N'
+  END
+    AS no_answer
+  FROM
+    `bi-srv-mobilityds-pr-80a48d.telus_nba.css_ref_release_code_orc` ),
+
+
+  css AS (
+  SELECT
+    temp_css_vendor_call.*,
+    ref_release_code.* EXCEPT(call_release_cd)
+  FROM
+    temp_css_vendor_call
+  JOIN
+    ref_release_code
+  ON
+    temp_css_vendor_call.call_release_cd = ref_release_code.call_release_cd),
+
+
+  temp_all_calls_code_sub AS (
+  SELECT
+    ban,
+    subscriber_no,
+    release_code_desc,
+    SUM(flag) AS all_calls_sub,
+    DATE_DIFF('2024-01-31', MAX(call_dt), DAY) + 1 AS call_date_recency_sub
+  FROM
+    css
+  GROUP BY
+    ban,
+    subscriber_no,
+    release_code_desc ),
+
+
+  temp_all_calls_code_sub_values AS (
+  SELECT
+    ban,
+    subscriber_no,
+    MAX(
+    IF
+      (release_code_desc = 'ABANDONED', all_calls_sub, NULL)) AS ABANDONED_call_sub,
+    MAX(
+    IF
+      (release_code_desc = 'ANSWERING MACHINE', all_calls_sub, NULL)) AS ANSWERING_MACHINE_call_sub,
+    MAX(
+    IF
+      (release_code_desc = 'BUSY SIGNAL', all_calls_sub, NULL)) AS BUSY_SIGNAL_call_sub,
+    MAX(
+    IF
+      (release_code_desc = 'CALL BACK', all_calls_sub, NULL)) AS CALL_BACK_call_sub,
+    MAX(
+    IF
+      (release_code_desc = 'CALL BACK - RANDOM', all_calls_sub, NULL)) AS CALL_BACK__RANDOM_call_sub,
+    MAX(
+    IF
+      (release_code_desc = 'CALL BACK - SCHEDULE', all_calls_sub, NULL)) AS CALL_BACK__SCHEDULE_call_sub,
+    MAX(
+    IF
+      (release_code_desc = 'D2C SUPPORT', all_calls_sub, NULL)) AS D2C_SUPPORT_call_sub,
+    MAX(
+    IF
+      (release_code_desc = 'DEAD AIR', all_calls_sub, NULL)) AS DEAD_AIR_call_sub,
+    MAX(
+    IF
+      (release_code_desc = 'DISCONNECTED', all_calls_sub, NULL)) AS DISCONNECTED_call_sub,
+    MAX(
+    IF
+      (release_code_desc = 'DO NOT CALL', all_calls_sub, NULL)) AS DO_NOT_CALL_call_sub,
+    MAX(
+    IF
+      (release_code_desc = 'DROPPED CALL', all_calls_sub, NULL)) AS DROPPED_CALL_call_sub,
+    MAX(
+    IF
+      (release_code_desc = 'EARLY HANG UP - RPC', all_calls_sub, NULL)) AS EARLY_HANG_UP__RPC_call_sub,
+    MAX(
+    IF
+      (release_code_desc = 'FAX', all_calls_sub, NULL)) AS FAX_call_sub,
+    MAX(
+    IF
+      (release_code_desc = 'MISDIRECTED', all_calls_sub, NULL)) AS MISDIRECTED_call_sub,
+    MAX(
+    IF
+      (release_code_desc = 'NO ANSWER', all_calls_sub, NULL)) AS NO_ANSWER_call_sub,
+    MAX(
+    IF
+      (release_code_desc = 'NO SALE', all_calls_sub, NULL)) AS NO_SALE_call_sub,
+    MAX(
+    IF
+      (release_code_desc = 'ORDER CANCELLED', all_calls_sub, NULL)) AS ORDER_CANCELLED_call_sub,
+    MAX(
+    IF
+      (release_code_desc = 'ORDER COMPLETED', all_calls_sub, NULL)) AS ORDER_COMPLETED_call_sub,
+    MAX(
+    IF
+      (release_code_desc = 'SALE', all_calls_sub, NULL)) AS SALE_call_sub,
+    MAX(
+    IF
+      (release_code_desc = 'TRANSFER', all_calls_sub, NULL)) AS TRANSFER_call_sub,
+    MAX(
+    IF
+      (release_code_desc = 'UNKNOWN', all_calls_sub, NULL)) AS UNKNOWN_call_sub,
+    MAX(
+    IF
+      (release_code_desc = 'WRONG NUMBER', all_calls_sub, NULL)) AS WRONG_NUMBER_call_sub
+  FROM
+    temp_all_calls_code_sub
+  GROUP BY
+    ban,
+    subscriber_no ),
+
+
+  temp_all_calls_code_sub_dates AS (
+  SELECT
+    ban,
+    subscriber_no,
+    MAX(
+    IF
+      (release_code_desc = 'ABANDONED', call_date_recency_sub, NULL)) AS ABANDONED_call_recency_sub,
+    MAX(
+    IF
+      (release_code_desc = 'ANSWERING MACHINE', call_date_recency_sub, NULL)) AS ANSWERING_MACHINE_call_recency_sub,
+    MAX(
+    IF
+      (release_code_desc = 'BUSY SIGNAL', call_date_recency_sub, NULL)) AS BUSY_SIGNAL_call_recency_sub,
+    MAX(
+    IF
+      (release_code_desc = 'CALL BACK', call_date_recency_sub, NULL)) AS CALL_BACK_call_recency_sub,
+    MAX(
+    IF
+      (release_code_desc = 'CALL BACK - RANDOM', call_date_recency_sub, NULL)) AS CALL_BACK__RANDOM_call_recency_sub,
+    MAX(
+    IF
+      (release_code_desc = 'CALL BACK - SCHEDULE', call_date_recency_sub, NULL)) AS CALL_BACK__SCHEDULE_call_recency_sub,
+    MAX(
+    IF
+      (release_code_desc = 'D2C SUPPORT', call_date_recency_sub, NULL)) AS D2C_SUPPORT_call_recency_sub,
+    MAX(
+    IF
+      (release_code_desc = 'DEAD AIR', call_date_recency_sub, NULL)) AS DEAD_AIR_call_recency_sub,
+    MAX(
+    IF
+      (release_code_desc = 'DISCONNECTED', call_date_recency_sub, NULL)) AS DISCONNECTED_call_recency_sub,
+    MAX(
+    IF
+      (release_code_desc = 'DO NOT CALL', call_date_recency_sub, NULL)) AS DO_NOT_CALL_call_recency_sub,
+    MAX(
+    IF
+      (release_code_desc = 'DROPPED CALL', call_date_recency_sub, NULL)) AS DROPPED_CALL_call_recency_sub,
+    MAX(
+    IF
+      (release_code_desc = 'EARLY HANG UP - RPC', call_date_recency_sub, NULL)) AS EARLY_HANG_UP__RPC_call_recency_sub,
+    MAX(
+    IF
+      (release_code_desc = 'FAX', call_date_recency_sub, NULL)) AS FAX_call_recency_sub,
+    MAX(
+    IF
+      (release_code_desc = 'MISDIRECTED', call_date_recency_sub, NULL)) AS MISDIRECTED_call_recency_sub,
+    MAX(
+    IF
+      (release_code_desc = 'NO ANSWER', call_date_recency_sub, NULL)) AS NO_ANSWER_call_recency_sub,
+    MAX(
+    IF
+      (release_code_desc = 'NO SALE', call_date_recency_sub, NULL)) AS NO_SALE_call_recency_sub,
+    MAX(
+    IF
+      (release_code_desc = 'ORDER CANCELLED', call_date_recency_sub, NULL)) AS ORDER_CANCELLED_call_recency_sub,
+    MAX(
+    IF
+      (release_code_desc = 'ORDER COMPLETED', call_date_recency_sub, NULL)) AS ORDER_COMPLETED_call_recency_sub,
+    MAX(
+    IF
+      (release_code_desc = 'SALE', call_date_recency_sub, NULL)) AS SALE_call_recency_sub,
+    MAX(
+    IF
+      (release_code_desc = 'TRANSFER', call_date_recency_sub, NULL)) AS TRANSFER_call_recency_sub,
+    MAX(
+    IF
+      (release_code_desc = 'UNKNOWN', call_date_recency_sub, NULL)) AS UNKNOWN_call_recency_sub,
+    MAX(
+    IF
+      (release_code_desc = 'WRONG NUMBER', call_date_recency_sub, NULL)) AS WRONG_NUMBER_call_recency_sub
+  FROM
+    temp_all_calls_code_sub
+  GROUP BY
+    ban,
+    subscriber_no ),
+
+
+  all_calls_code_sub AS (
+  SELECT
+    temp_all_calls_code_sub_values.ban,
+    temp_all_calls_code_sub_values.subscriber_no,
+    temp_all_calls_code_sub_values.ABANDONED_call_sub,
+    temp_all_calls_code_sub_values.ANSWERING_MACHINE_call_sub,
+    temp_all_calls_code_sub_values.BUSY_SIGNAL_call_sub,
+    temp_all_calls_code_sub_values.CALL_BACK_call_sub,
+    temp_all_calls_code_sub_values.CALL_BACK__RANDOM_call_sub,
+    temp_all_calls_code_sub_values.CALL_BACK__SCHEDULE_call_sub,
+    temp_all_calls_code_sub_values.D2C_SUPPORT_call_sub,
+    temp_all_calls_code_sub_values.DEAD_AIR_call_sub,
+    temp_all_calls_code_sub_values.DISCONNECTED_call_sub,
+    temp_all_calls_code_sub_values.DO_NOT_CALL_call_sub,
+    temp_all_calls_code_sub_values.DROPPED_CALL_call_sub,
+    temp_all_calls_code_sub_values.EARLY_HANG_UP__RPC_call_sub,
+    temp_all_calls_code_sub_values.FAX_call_sub,
+    temp_all_calls_code_sub_values.MISDIRECTED_call_sub,
+    temp_all_calls_code_sub_values.NO_ANSWER_call_sub,
+    temp_all_calls_code_sub_values.NO_SALE_call_sub,
+    temp_all_calls_code_sub_values.ORDER_CANCELLED_call_sub,
+    temp_all_calls_code_sub_values.ORDER_COMPLETED_call_sub,
+    temp_all_calls_code_sub_values.SALE_call_sub,
+    temp_all_calls_code_sub_values.TRANSFER_call_sub,
+    temp_all_calls_code_sub_values.UNKNOWN_call_sub,
+    temp_all_calls_code_sub_values.WRONG_NUMBER_call_sub,
+    temp_all_calls_code_sub_dates.ABANDONED_call_recency_sub,
+    temp_all_calls_code_sub_dates.ANSWERING_MACHINE_call_recency_sub,
+    temp_all_calls_code_sub_dates.BUSY_SIGNAL_call_recency_sub,
+    temp_all_calls_code_sub_dates.CALL_BACK_call_recency_sub,
+    temp_all_calls_code_sub_dates.CALL_BACK__RANDOM_call_recency_sub,
+    temp_all_calls_code_sub_dates.CALL_BACK__SCHEDULE_call_recency_sub,
+    temp_all_calls_code_sub_dates.D2C_SUPPORT_call_recency_sub,
+    temp_all_calls_code_sub_dates.DEAD_AIR_call_recency_sub,
+    temp_all_calls_code_sub_dates.DISCONNECTED_call_recency_sub,
+    temp_all_calls_code_sub_dates.DO_NOT_CALL_call_recency_sub,
+    temp_all_calls_code_sub_dates.DROPPED_CALL_call_recency_sub,
+    temp_all_calls_code_sub_dates.EARLY_HANG_UP__RPC_call_recency_sub,
+    temp_all_calls_code_sub_dates.FAX_call_recency_sub,
+    temp_all_calls_code_sub_dates.MISDIRECTED_call_recency_sub,
+    temp_all_calls_code_sub_dates.NO_ANSWER_call_recency_sub,
+    temp_all_calls_code_sub_dates.NO_SALE_call_recency_sub,
+    temp_all_calls_code_sub_dates.ORDER_CANCELLED_call_recency_sub,
+    temp_all_calls_code_sub_dates.ORDER_COMPLETED_call_recency_sub,
+    temp_all_calls_code_sub_dates.SALE_call_recency_sub,
+    temp_all_calls_code_sub_dates.TRANSFER_call_recency_sub,
+    temp_all_calls_code_sub_dates.UNKNOWN_call_recency_sub,
+    temp_all_calls_code_sub_dates.WRONG_NUMBER_call_recency_sub
+  FROM
+    temp_all_calls_code_sub_values
+  JOIN
+    temp_all_calls_code_sub_dates
+  ON
+    temp_all_calls_code_sub_values.ban = temp_all_calls_code_sub_dates.ban
+    AND temp_all_calls_code_sub_values.subscriber_no = temp_all_calls_code_sub_dates.subscriber_no),
+
+    
+  css_vendor_call AS ( -- Feature: css_vendor_call
+  SELECT
+    active_koodo_base_subs.ban,
+    active_koodo_base_subs.subscriber_no,
+    all_calls_sub.* EXCEPT (ban,
+      subscriber_no),
+    all_calls_code_sub.* EXCEPT (ban,
+      subscriber_no)
+  FROM
+    active_koodo_base_subs
+  LEFT JOIN
+    all_calls_sub
+  ON
+    all_calls_sub.ban = active_koodo_base_subs.ban
+    AND all_calls_sub.subscriber_no = CAST(active_koodo_base_subs.subscriber_no AS NUMERIC)
+  LEFT JOIN
+    all_calls_code_sub
+  ON
+    all_calls_code_sub.ban = active_koodo_base_subs.ban
+    AND all_calls_code_sub.subscriber_no =  CAST(active_koodo_base_subs.subscriber_no AS NUMERIC) ),
+
+
+  journey_activities AS (
+  SELECT
+    bus_bacct_num AS ban,
+    prod_instnc_resrc_str AS subscriber_no,
+    intractn_event_utc_ts AS event_dt,
+    session_id,
+    effort_duration_sec,
+    LOWER(REGEXP_REPLACE(intractn_event_category_nm, r'[ /]', '_')) AS intractn_event_category_nm,
+    LOWER(REGEXP_REPLACE(intractn_event_nm, r'[ /]', '_')) AS intractn_event_nm,
+    CONCAT(intractn_event_category_nm, '_', intractn_event_nm) AS tag,
+    DATE_DIFF('2024-01-31', DATE(intractn_event_utc_ts), DAY) + 1 AS event_recency
+  FROM
+    `cio-datahub-enterprise-pr-183a.ent_cust_intractn.bq_cust_journey_chnl_event`
+  WHERE
+    DATE(part_event_dt) >= DATE_SUB('2024-01-31', INTERVAL 30 DAY)
+    AND DATE(part_event_dt) <= '2024-01-31'
+    AND bacct_brand_id = 3),
+
+
+  temp_journey_sub AS (
+  SELECT
+    ban,
+    subscriber_no,
+    tag,
+    MAX(event_recency) AS event_recency_sub
+  FROM
+    journey_activities
+  WHERE
+    intractn_event_category_nm NOT IN ('telus_my_acct',
+      'koodo_my_acct',
+      'telus_app4',
+      'webchat')
+  GROUP BY
+    ban,
+    subscriber_no,
+    tag),
+
+
+  journey_sub AS (
+  SELECT
+    ban,
+    subscriber_no,
+    SUM(
+    IF
+      (LOWER(tag) = 'call_inbound', event_recency_sub, NULL)) AS call_inbound_sub,
+    SUM(
+    IF
+      (LOWER(tag) = 'call_internal', event_recency_sub, NULL)) AS call_internal_sub,
+    SUM(
+    IF
+      (LOWER(tag) = 'call_outbound', event_recency_sub, NULL)) AS call_outbound_sub,
+    SUM(
+    IF
+      (LOWER(tag) = 'casa_task_completed_task_billing_accountstatuscheck', event_recency_sub, NULL)) AS casa_task_completed_task_billing_accountstatuscheck_sub,
+    SUM(
+    IF
+      (LOWER(tag) = 'casa_task_completed_task_sos_cctsfollowup', event_recency_sub, NULL)) AS casa_task_completed_task_sos_cctsfollowup_sub,
+    SUM(
+    IF
+      (LOWER(tag) = 'casa_task_completed_task_sos_managercallback', event_recency_sub, NULL)) AS casa_task_completed_task_sos_managercallback_sub,
+    SUM(
+    IF
+      (LOWER(tag) = 'casa_task_completed_task_sos_privacyfollowup', event_recency_sub, NULL)) AS casa_task_completed_task_sos_privacyfollowup_sub,
+    SUM(
+    IF
+      (LOWER(tag) = 'customer_credit_customer_credit', event_recency_sub, NULL)) AS customer_credit_customer_credit_sub,
+    SUM(
+    IF
+      (LOWER(tag) = 'koodo_classic_tel_koodo-', event_recency_sub, NULL)) AS koodo_classic_tel_koodo__sub,
+    SUM(
+    IF
+      (LOWER(tag) = 'notification_sms_notification_', event_recency_sub, NULL)) AS notification_sms_notification__sub,
+    SUM(
+    IF
+      (LOWER(tag) = 'outcome_case_closed_case_account management', event_recency_sub, NULL)) AS outcome_case_closed_case_account_management_sub,
+    SUM(
+    IF
+      (LOWER(tag) = 'outcome_case_closed_case_executive customer relations', event_recency_sub, NULL)) AS outcome_case_closed_case_executive_customer_relations_sub,
+    SUM(
+    IF
+      (LOWER(tag) = 'outcome_case_closed_case_learn about a product/service', event_recency_sub, NULL)) AS outcome_case_closed_case_learn_about_a_product_service_sub,
+    SUM(
+    IF
+      (LOWER(tag) = 'outcome_case_created_case_account management', event_recency_sub, NULL)) AS outcome_case_created_case_account_management_sub,
+    SUM(
+    IF
+      (LOWER(tag) = 'outcome_case_created_case_executive customer relations', event_recency_sub, NULL)) AS outcome_case_created_case_executive_customer_relations_sub,
+    SUM(
+    IF
+      (LOWER(tag) = 'outcome_case_created_case_learn about a product/service', event_recency_sub, NULL)) AS outcome_case_created_case_learn_about_a_product_service_sub,
+    SUM(
+    IF
+      (LOWER(tag) = 'outcome_task_created_task_email', event_recency_sub, NULL)) AS outcome_task_created_task_email_sub,
+    SUM(
+    IF
+      (LOWER(tag) = 'retail_store_crd', event_recency_sub, NULL)) AS retail_store_crd_sub,
+    SUM(
+    IF
+      (LOWER(tag) = 'retail_store_doa_r', event_recency_sub, NULL)) AS retail_store_doa_r_sub,
+    SUM(
+    IF
+      (LOWER(tag) = 'retail_store_mbg', event_recency_sub, NULL)) AS retail_store_mbg_sub,
+    SUM(
+    IF
+      (LOWER(tag) = 'retail_store_om_r', event_recency_sub, NULL)) AS retail_store_om_r_sub,
+    SUM(
+    IF
+      (LOWER(tag) = 'retail_store_rfund', event_recency_sub, NULL)) AS retail_store_rfund_sub,
+    SUM(
+    IF
+      (LOWER(tag) = 'retail_store_sales', event_recency_sub, NULL)) AS retail_store_sales_sub,
+    SUM(
+    IF
+      (LOWER(tag) = 'service_request_activation', event_recency_sub, NULL)) AS service_request_activation_sub,
+    SUM(
+    IF
+      (LOWER(tag) = 'service_request_cancel', event_recency_sub, NULL)) AS service_request_cancel_sub,
+    SUM(
+    IF
+      (LOWER(tag) = 'service_request_hardware_upgrade', event_recency_sub, NULL)) AS service_request_hardware_upgrade_sub,
+    SUM(
+    IF
+      (LOWER(tag) = 'service_request_migration', event_recency_sub, NULL)) AS service_request_migration_sub,
+    SUM(
+    IF
+      (LOWER(tag) = 'service_request_renewal', event_recency_sub, NULL)) AS service_request_renewal_sub,
+    SUM(
+    IF
+      (LOWER(tag) = 'service_request_restore', event_recency_sub, NULL)) AS service_request_restore_sub,
+    SUM(
+    IF
+      (LOWER(tag) = 'store_mss_getting_started', event_recency_sub, NULL)) AS store_mss_getting_started_sub,
+    SUM(
+    IF
+      (LOWER(tag) = 'store_qsm_store_', event_recency_sub, NULL)) AS store_qsm_store__sub,
+    SUM(
+    IF
+      (LOWER(tag) = 'store_qsm_store_add-on', event_recency_sub, NULL)) AS store_qsm_store_add_on_sub,
+    SUM(
+    IF
+      (LOWER(tag) = 'store_qsm_store_changes to account', event_recency_sub, NULL)) AS store_qsm_store_changes_to_account_sub,
+    SUM(
+    IF
+      (LOWER(tag) = 'store_qsm_store_client ebill', event_recency_sub, NULL)) AS store_qsm_store_client_ebill_sub,
+    SUM(
+    IF
+      (LOWER(tag) = 'store_qsm_store_client notes', event_recency_sub, NULL)) AS store_qsm_store_client_notes_sub,
+    SUM(
+    IF
+      (LOWER(tag) = 'store_qsm_store_exchange', event_recency_sub, NULL)) AS store_qsm_store_exchange_sub,
+    SUM(
+    IF
+      (LOWER(tag) = 'store_qsm_store_renew-upgrade', event_recency_sub, NULL)) AS store_qsm_store_renew_upgrade_sub,
+    SUM(
+    IF
+      (LOWER(tag) = 'store_qsm_store_return', event_recency_sub, NULL)) AS store_qsm_store_return_sub,
+    SUM(
+    IF
+      (LOWER(tag) = 'store_qsm_store_sthndr', event_recency_sub, NULL)) AS store_qsm_store_sthndr_sub,
+    SUM(
+    IF
+      (LOWER(tag) = 'store_qsm_store_upgrade', event_recency_sub, NULL)) AS store_qsm_store_upgrade_sub
+  FROM
+    temp_journey_sub
+  GROUP BY
+    ban,
+    subscriber_no),
+
+
+  temp_journey_events_sub AS (
+  SELECT
+    ban,
+    subscriber_no,
+    intractn_event_category_nm,
+    MAX(event_recency) AS event_recency_sub
+  FROM
+    journey_activities
+  GROUP BY
+    ban,
+    subscriber_no,
+    intractn_event_category_nm),
+
+
+  journey_events_sub AS (
+  SELECT
+    ban,
+    subscriber_no,
+    SUM(
+    IF
+      (LOWER(intractn_event_category_nm) = 'call', event_recency_sub, NULL)) AS call_sub,
+    SUM(
+    IF
+      (LOWER(intractn_event_category_nm) = 'casa_task_completed', event_recency_sub, NULL)) AS casa_task_completed_sub,
+    SUM(
+    IF
+      (LOWER(intractn_event_category_nm) = 'customer_credit', event_recency_sub, NULL)) AS customer_credit_sub,
+    SUM(
+    IF
+      (LOWER(intractn_event_category_nm) = 'koodo_classic', event_recency_sub, NULL)) AS koodo_classic_sub,
+    SUM(
+    IF
+      (LOWER(intractn_event_category_nm) = 'koodo_my_acct', event_recency_sub, NULL)) AS koodo_my_acct_sub,
+    SUM(
+    IF
+      (LOWER(intractn_event_category_nm) = 'mobility_payment', event_recency_sub, NULL)) AS mobility_payment_sub,
+    SUM(
+    IF
+      (LOWER(intractn_event_category_nm) = 'notification_sms', event_recency_sub, NULL)) AS notification_sms_sub,
+    SUM(
+    IF
+      (LOWER(intractn_event_category_nm) = 'outcome_case_closed', event_recency_sub, NULL)) AS outcome_case_closed_sub,
+    SUM(
+    IF
+      (LOWER(intractn_event_category_nm) = 'outcome_case_created', event_recency_sub, NULL)) AS outcome_case_created_sub,
+    SUM(
+    IF
+      (LOWER(intractn_event_category_nm) = 'outcome_task_created', event_recency_sub, NULL)) AS outcome_task_created_sub,
+    SUM(
+    IF
+      (LOWER(intractn_event_category_nm) = 'retail_store', event_recency_sub, NULL)) AS retail_store_sub,
+    SUM(
+    IF
+      (LOWER(intractn_event_category_nm) = 'service_request', event_recency_sub, NULL)) AS service_request_sub,
+    SUM(
+    IF
+      (LOWER(intractn_event_category_nm) = 'store_mss', event_recency_sub, NULL)) AS store_mss_sub,
+    SUM(
+    IF
+      (LOWER(intractn_event_category_nm) = 'store_qsm', event_recency_sub, NULL)) AS store_qsm_sub,
+    SUM(
+    IF
+      (LOWER(intractn_event_category_nm) = 'telus_app4', event_recency_sub, NULL)) AS telus_app4_sub,
+    SUM(
+    IF
+      (LOWER(intractn_event_category_nm) = 'telus_my_acct', event_recency_sub, NULL)) AS telus_my_acct_sub,
+    SUM(
+    IF
+      (LOWER(intractn_event_category_nm) = 'webchat', event_recency_sub, NULL)) AS webchat_sub
+  FROM
+    temp_journey_events_sub
+  GROUP BY
+    ban,
+    subscriber_no),
+
+
+  journey AS ( -- Feature: journey
+  SELECT
+    active_koodo_base_subs.ban,
+    active_koodo_base_subs.subscriber_no,
+    journey_sub.* EXCEPT (ban,
+      subscriber_no),
+    journey_events_sub.* EXCEPT (ban,
+      subscriber_no)
+  FROM
+    active_koodo_base_subs
+  LEFT JOIN
+    journey_sub
+  ON
+    journey_sub.ban = active_koodo_base_subs.ban
+    AND journey_sub.subscriber_no = active_koodo_base_subs.subscriber_no
+  LEFT JOIN
+    journey_events_sub
+  ON
+    journey_events_sub.ban = active_koodo_base_subs.ban
+    AND journey_events_sub.subscriber_no = active_koodo_base_subs.subscriber_no ),
+
+
+  temp_pp_soc AS (
+  SELECT
+    ban,
+    subscriber_no,
+    UPPER(TRIM(soc)) AS soc,
+    service_type AS service_type_cd,
+    DATE(effective_date) AS soc_effective_ts,
+    DATE(expiration_date) AS expiration_dt,
+    DATE(effective_issue_date) AS effective_issue_ts,
+    ROW_NUMBER() OVER (PARTITION BY ban, subscriber_no ORDER BY effective_issue_date DESC) AS rank
+  FROM
+    `cio-datahub-enterprise-pr-183a.src_kb.bq_service_agreement`
+  WHERE
+    (expiration_date IS NULL
+      OR DATE(expiration_date) >= '2024-01-31')
+    AND DATE(soc_effective_date) < '2024-01-31'
+    AND service_type = 'P' ),
+
+
+  pp_soc AS (
+  SELECT
+    ban,
+    subscriber_no,
+    soc
+  FROM
+    temp_pp_soc
+  WHERE
+    rank = 1),
+
+
+  nba_mob_soc AS (
+  SELECT
+    soc,
+    MAX(watch_soc) AS watch_soc,
+    MAX(tablet_soc) AS tablet_soc,
+    MAX(byod_soc) AS byod_soc,
+    MAX(pom_soc) AS pom_soc,
+    MAX(pomc_soc) AS pomc_soc,
+    MAX(ss_soc) AS ss_soc,
+    MAX(yc_soc) AS yc_soc,
+    MAX(voice_only_soc) AS voice_only_soc,
+    MAX(unlimited_soc) AS unlimited_soc,
+    MAX(us_ca_soc) AS us_ca_soc,
+    MAX(ezr_soc) AS ezr_soc,
+    MAX(stream_plus_soc) AS stream_plus_soc,
+    MAX(ew_soc) AS ew_soc,
+    MAX(fiveg_soc) AS fiveg_soc,
+    MAX(fivegplus_soc) AS fivegplus_soc
+  FROM
+    `bi-srv-mobilityds-pr-80a48d.telus_nba.telus_nba_socs`
+  GROUP BY
+    soc),
+
+
+  pp AS (
+  SELECT
+    DISTINCT pp_soc.ban,
+    pp_soc.subscriber_no,
+    pp_soc.soc,
+    nba_mob_soc.byod_soc,
+    nba_mob_soc.pom_soc,
+    nba_mob_soc.pomc_soc,
+    nba_mob_soc.ss_soc,
+    nba_mob_soc.yc_soc,
+    nba_mob_soc.voice_only_soc,
+    nba_mob_soc.unlimited_soc,
+    nba_mob_soc.us_ca_soc,
+    nba_mob_soc.ezr_soc,
+    nba_mob_soc.watch_soc,
+    nba_mob_soc.tablet_soc,
+    nba_mob_soc.fiveg_soc,
+    nba_mob_soc.fivegplus_soc,
+    nba_mob_soc.stream_plus_soc,
+    nba_mob_soc.ew_soc
+  FROM
+    pp_soc
+  LEFT JOIN
+    nba_mob_soc
+  ON
+    UPPER(TRIM(pp_soc.soc)) = nba_mob_soc.soc ),
+
+    
+  price_plan_catlg AS ( -- Feature: price_plan_catlg
+  SELECT
+    active_koodo_base_subs.ban,
+    active_koodo_base_subs.subscriber_no,
+    pp.* EXCEPT (ban,
+      subscriber_no),
+  FROM
+    active_koodo_base_subs
+  INNER JOIN
+    pp
+  ON
+    pp.ban = active_koodo_base_subs.ban
+    AND pp.subscriber_no = active_koodo_base_subs.subscriber_no ),
+
+
+  contract_koodo_base AS ( -- Feature: contract_status
+    SELECT
+      BAN,
+      SUBSCRIBER_NO,
+      CONTRACT_STATUS
+    FROM `bi-srv-mobilityds-pr-80a48d.churn_reporting_dashboards.bq_contract_koodo_base`
+    WHERE MONTH_END_SNAPSHOT = '2024-01-31'  ),
+
+
+  churn_label AS ( -- Label: churn_label
+    SELECT
+      cfr_ban AS ban,
+      cfr_subscriber_no AS subscriber_no,
+      MAX(cfr_create_date) AS label_date,
+      1 AS label
+    FROM `cio-datahub-enterprise-pr-183a.ent_cust_cust.bq_wls_subscr_canc`
+    WHERE
+      DATE(cfr_create_date) >= '2024-01-01'
+      AND DATE(cfr_create_date) <= '2024-02-29'
+    GROUP BY cfr_ban, cfr_subscriber_no )
+
+
+SELECT
+  DISTINCT koodo_churn_base.ban,
+  koodo_churn_base.subscriber_no,
+  koodo_churn_base.prod_instnc_id,
+  DATE('2024-01-31') AS base_part_dt,
+  koodo_churn_base.tab_bal AS tab_balance_sub_level,
+  koodo_churn_base.subscription_type,
+  num_subscribers.num_subs AS ban_size,
+  contract_koodo_base.CONTRACT_STATUS,
+  arpu_sub.* EXCEPT (ban,
+    subscriber_no,
+    base_part_dt),
+  bill_ban.* EXCEPT (ban,
+    base_part_dt),
+  bill_sub.* EXCEPT (ban,
+    subscriber_no,
+    base_part_dt),
+  call_session_summary.* EXCEPT (ban,
+    subscriber_no),
+  clickstream.* EXCEPT (ban,
+    base_part_dt),
+  css_vendor_call.* EXCEPT (ban,
+    subscriber_no),
+  device.* EXCEPT (ban,
+    subscriber_no,
+    base_part_dt),
+  journey.* EXCEPT (ban,
+    subscriber_no),
+  pip.* EXCEPT (ban,
+    subscriber_no,
+    base_part_dt),
+  price_plan_catlg.* EXCEPT (ban,
+    subscriber_no),
+  ucir.* EXCEPT (ban,
+    subscriber_no,
+    base_part_dt,
+    curr_chrg_amt,
+    curr_cr_amt,
+    bacct_curr_dvc_bal),
+  ucir.bacct_curr_dvc_bal AS tab_balance_ban_level,
+  ucir.curr_chrg_amt AS ucir_curr_chrg_amt,
+  ucir.curr_cr_amt AS ucir_curr_cr_amt,
+  wls_cancel.* EXCEPT (ban,
+    base_part_dt),
+  IFNULL(churn_label.label, 0) AS label
+FROM
+  koodo_churn_base
+LEFT JOIN (
+  SELECT
+    ban,
+    COUNT(DISTINCT subscriber_no) AS num_subs
+  FROM
+    koodo_churn_base
+  GROUP BY
+    ban) AS num_subscribers
+ON
+  koodo_churn_base.ban = num_subscribers.ban
+LEFT JOIN
+  contract_koodo_base
+ON
+  koodo_churn_base.ban = contract_koodo_base.BAN
+  AND koodo_churn_base.subscriber_no = CAST(contract_koodo_base.SUBSCRIBER_NO AS STRING)
+LEFT JOIN
+  churn_label
+ON
+  CAST(koodo_churn_base.ban AS STRING) = churn_label.ban
+  AND koodo_churn_base.subscriber_no = churn_label.subscriber_no
+LEFT JOIN
+  arpu_sub
+ON
+  koodo_churn_base.ban = arpu_sub.ban
+  AND koodo_churn_base.subscriber_no = arpu_sub.subscriber_no
+LEFT JOIN
+  bill_ban
+ON
+  koodo_churn_base.ban = bill_ban.ban
+LEFT JOIN
+  bill_sub
+ON
+  koodo_churn_base.ban = bill_sub.ban
+  AND koodo_churn_base.subscriber_no = bill_sub.subscriber_no
+LEFT JOIN
+  call_session_summary
+ON
+  koodo_churn_base.ban = call_session_summary.ban
+  AND koodo_churn_base.subscriber_no = call_session_summary.subscriber_no
+LEFT JOIN
+  clickstream
+ON
+  koodo_churn_base.ban = clickstream.ban
+LEFT JOIN
+  css_vendor_call
+ON
+  koodo_churn_base.ban = css_vendor_call.ban
+  AND koodo_churn_base.subscriber_no = css_vendor_call.subscriber_no
+LEFT JOIN
+  device
+ON
+  koodo_churn_base.ban = device.ban
+  AND koodo_churn_base.subscriber_no = device.subscriber_no
+LEFT JOIN
+  journey
+ON
+  koodo_churn_base.ban = journey.ban
+  AND koodo_churn_base.subscriber_no = journey.subscriber_no
+LEFT JOIN
+  pip
+ON
+  koodo_churn_base.ban = pip.ban
+  AND koodo_churn_base.subscriber_no = pip.subscriber_no
+LEFT JOIN
+  price_plan_catlg
+ON
+  koodo_churn_base.ban = price_plan_catlg.ban
+  AND koodo_churn_base.subscriber_no = price_plan_catlg.subscriber_no
+LEFT JOIN
+  ucir
+ON
+  koodo_churn_base.ban = ucir.ban
+  AND koodo_churn_base.subscriber_no = ucir.subscriber_no
+LEFT JOIN
+  wls_cancel
+ON
+  koodo_churn_base.ban = wls_cancel.ban
+WHERE CONTRACT_STATUS = 'OFF-CONTRACT'
+      -- AND subscription_type = 'MTM'
+      AND subscription_type = 'BYOD'
