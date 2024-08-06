@@ -1,0 +1,100 @@
+CREATE OR REPLACE TABLE `divg-team-v03-pr-de558a.tms_consolidated_reporting.TMS_port_outs_April_to_July_2024` AS
+SELECT
+  CAST(ban AS int64) AS ban,
+  CAST(subscriber_no AS string) AS subscriber_no,
+  DATE(CONCAT(CAST(SUBSTR(migration_date, 6, 4) AS INT64),
+                   '-',
+                   CASE SUBSTR(migration_date, 3, 3)
+                    WHEN 'JAN' THEN 1
+                    WHEN 'FEB' THEN 2
+                    WHEN 'MAR' THEN 3
+                    WHEN 'APR' THEN 4
+                    WHEN 'MAY' THEN 5
+                    WHEN 'JUN' THEN 6
+                    WHEN 'JUL' THEN 7
+                    WHEN 'AUG' THEN 8
+                    WHEN 'SEP' THEN 9
+                    WHEN 'OCT' THEN 10
+                    WHEN 'NOV' THEN 11
+                    WHEN 'DEC' THEN 12
+                   END,
+                   '-',
+                   CAST(SUBSTR(migration_date, 1, 2) AS INT64))) AS migration_date,
+  CASE
+    WHEN previous_brand = 'KCPR' THEN 'Koodo Prepaid'
+    WHEN previous_brand = 'TCPR' THEN 'TELUS Prepaid'
+    WHEN previous_brand IN ('KCPO', 'Koodo Mobile') THEN 'Koodo Postpaid'
+    WHEN previous_brand IN ('TCPO', 'Telus regular brand') THEN 'TELUS Postpaid'
+  END AS previous_brand,
+  CASE
+    WHEN new_brand = 'TCPO' THEN 'TELUS Postpaid'
+    WHEN new_brand = 'KCPO' THEN 'Koodo Postpaid'
+    WHEN new_brand = 'KCPR' THEN 'Koodo Prepaid'
+    WHEN new_brand = 'TCPR' THEN 'TELUS Prepaid'
+    WHEN new_brand LIKE '%QUEBEC INC%' THEN 'Quebec INC.'
+    WHEN new_brand = 'ACCESS COMMUNICATIONS COOP LIMITED' THEN 'Access Communications'
+    WHEN new_brand = 'ALIANT MOBILITY' THEN 'Aliant Mobility'
+    WHEN new_brand = 'ALLSTREAM CORP.' THEN 'Allstream CORP.'
+    WHEN new_brand = 'AMTELECOM INC' THEN 'Amtelecom INC.'
+    WHEN new_brand = 'BEANFIELD TECHNOLOGIES, INC.' THEN 'Beanfield Technologies INC.'
+    WHEN new_brand LIKE '%BELL%' THEN 'Bell'
+    WHEN new_brand = 'BRAGG COMMUNICATIONS INC.' THEN 'Bragg Communcations INC.'
+      WHEN LOWER(new_brand) LIKE '%city%west%' THEN 'CityWest Cable and Telephone CORP.'
+    WHEN new_brand = 'COMMERCIAL-ENT' THEN 'TELUS Commercial ENT'
+    WHEN new_brand = 'COMMERCIAL-MM' THEN 'TELUS Commercial MM'
+    WHEN new_brand = 'COMWAVE NETWORKS INC. -ON' THEN 'Comwave Networks INC.'
+    WHEN new_brand LIKE '%DISTRIBUTEL%' THEN 'Distributel Communications LTD.'
+    WHEN new_brand = 'EASTLINK LIMITED' THEN 'Eastlink Limited'
+    WHEN new_brand = 'ENT' THEN 'TELUS ENT'
+    WHEN new_brand = 'EPP' THEN 'TELUS Enterprise Partner Program (EPP)'
+    WHEN new_brand = 'EXATEL INC' THEN 'Exatel INC.'
+    WHEN new_brand = 'EXCULINK TELECOM ON' THEN 'Execulink Telecom INC.'
+    WHEN new_brand = 'Execulink Telecom Inc' THEN 'Execulink Telecom INC.'
+    WHEN new_brand = 'FIBERNETICS CORPORATION' THEN 'Fibernetics CORP.'
+    WHEN new_brand = 'FIDO SOLUTIONS' THEN 'Fido Solutions'
+    WHEN new_brand = 'FREEDOM MOBILE INC.' THEN 'Freedom Mobile INC.'
+    WHEN new_brand = 'INNSYSVOICE CORP - ON' THEN 'Innsysvoice CORP.'
+    WHEN new_brand = 'IRISTEL INC.' THEN 'Iristel INC.'
+    WHEN new_brand = 'ISP TELECOM INC' THEN 'ISP Telecom INC.'
+    WHEN new_brand = 'IVIC TELECOM S.E.N.C. - QC' THEN 'IVIC Telecom'
+    WHEN new_brand = 'IXICA COMMUNICATIONS, INC.' THEN 'IXICA Communcations INC.'
+    WHEN new_brand = 'LES NET (1996) INC - MB' THEN 'Les Net INC.'
+    WHEN new_brand = 'KCPO' THEN 'Koodo Postpaid'
+    WHEN new_brand = 'KCPR' THEN 'Koodo Prepaid'
+    WHEN new_brand = 'MANAGED NTWK SYS CN' THEN 'Managed Network System'
+    WHEN new_brand = 'MASKATEL INC.' THEN 'Maskatel INC.'
+    WHEN new_brand = 'MID_MKT' THEN 'TELUS MID MKT'
+      WHEN LOWER(new_brand) LIKE '%mts%allstream%' THEN 'MTS Allstream Communications'
+    WHEN new_brand = 'NORTHERNTEL WIRELINE' THEN 'Northerntel Wireline'
+    WHEN new_brand = 'NORTHWESTEL INC' THEN 'NorthWestel INC.'
+    WHEN new_brand = 'PBMO' THEN 'Public Mobile'
+    WHEN new_brand = 'PCMO' THEN 'PC Mobile'
+    WHEN new_brand = 'PROVINCIAL TEL INC. - MB' THEN 'Provincial Tel INC.'
+    WHEN new_brand = 'PUBLIC' THEN 'Public Mobile'
+    WHEN new_brand = 'Primus Management' THEN 'Primus Management'
+    WHEN new_brand LIKE '%ROGERS%' THEN 'Rogers'
+    WHEN new_brand LIKE '%SASKTEL%' THEN 'Sasktel Mobility'
+    WHEN new_brand = 'SBS' THEN 'TELUS SBS'
+    WHEN new_brand = 'SHAW TELECOM INC. BC' THEN 'Shaw Telecom'
+    WHEN new_brand = 'SHAW Telecom' THEN 'Shaw Telecom'
+    WHEN new_brand = 'SMB' THEN 'TELUS SMB'
+    WHEN new_brand = 'SOGETEL INC' THEN 'Sogetel INC.'
+    WHEN new_brand = 'SSI CONNEXIONS INC - NT 940G' THEN 'SSI Connextions INC.'
+    WHEN new_brand = 'TBAYTEL WIRELINE' THEN 'Tbaytel Wireline'
+    WHEN new_brand = 'TCPO' THEN 'TELUS Postpaid'
+    WHEN new_brand = 'TCPR' THEN 'TELUS Prepaid'
+    WHEN new_brand = 'TEKSAVVY SOLUTIONS INC. - ON' THEN 'Teksavvy Solutions INC.'
+    WHEN new_brand = 'TEL GUEVREMONT INC' THEN 'Tel Guevremont INC.'
+    WHEN new_brand = 'TELEBEC LIMITED PARTNERSHIP' THEN 'Telebec Limited Partnership'
+    WHEN new_brand LIKE '%VIDEOTRON%' THEN 'Videotron LTD.'
+    WHEN new_brand = 'TELEPHONE MILOT INC' THEN 'Telephone Milot INC.'
+    WHEN new_brand = 'TELIPHONE NAVIGATA-WESTEL COMM INC - BC' THEN 'Teliphone Navigata - Westel Comm INC.'
+    WHEN new_brand = 'TES' THEN 'TELUS TES'
+    WHEN new_brand = 'TES_OTH' THEN 'TELUS TES_OTH'
+    WHEN new_brand = 'TPS' THEN 'TELUS TPS'
+    WHEN new_brand = 'WESTMAN MEDIA COOPERATIVE LTD' THEN 'Westman Media Cooperative LTD.'
+    WHEN new_brand LIKE '%WIGHTMAN%' THEN 'Wightman Comms'
+    WHEN new_brand = 'XPLORNET COMMUNICATIONS, INC.' THEN 'Xplornet Communications INC.'
+    ELSE 'N/A'
+  END AS new_brand
+FROM `divg-team-v03-pr-de558a.tms_consolidated_reporting.TMS_port_outs_April_to_July_2024`
