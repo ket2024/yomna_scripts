@@ -1,0 +1,27 @@
+CREATE OR REPLACE TABLE `divg-team-v03-pr-de558a.tms_consolidated_reporting.TMS_household_distribution` AS
+SELECT a.BAN, a.SEGMENT_ROLLUP_2, b.* EXCEPT(BAN)
+FROM `divg-team-v03-pr-de558a.tms_consolidated_reporting.tk_post_pre_mp_tms_base_202405` a
+LEFT JOIN `divg-team-v03-pr-de558a.tms_consolidated_reporting.household_table_SAS_202405` b
+ON a.BAN = b.BAN
+WHERE a.BAN IS NOT NULL;
+
+CREATE OR REPLACE TABLE `divg-team-v03-pr-de558a.tms_consolidated_reporting.TMS_household_distribution_II` AS
+SELECT BAN,
+       BACCT_GROUP_ID,
+       (TELUS_CONS_POSTPAID_CNT + TELUS_PREPAID_CNT) AS T_MOB,
+       (KOODO_POSTPAID_CNT + KOODO_PREPAID_CNT) AS K_MOB,
+       (FFH_BAN_CNT + FFH_CUST_CNT) AS FFH
+FROM `divg-team-v03-pr-de558a.tms_consolidated_reporting.TMS_household_distribution`;
+
+CREATE OR REPLACE TABLE `divg-team-v03-pr-de558a.tms_consolidated_reporting.TMS_household_distribution_III` AS
+SELECT BAN,
+       BACCT_GROUP_ID,
+       CASE
+            WHEN T_MOB = 0 AND K_MOB > 0 AND FFH = 0 THEN 'Koodo MOB'
+            WHEN T_MOB > 0 AND K_MOB = 0 AND FFH = 0 THEN 'TELUS MOB'
+            WHEN T_MOB = 0 AND K_MOB > 0 AND FFH > 0 THEN 'Koodo MOB + FFH'
+            WHEN T_MOB > 0 AND K_MOB = 0 AND FFH > 0 THEN 'TELUS MOB + FFH'
+            WHEN T_MOB > 0 AND K_MOB > 0 AND FFH = 0 THEN 'TELUS MOB + Koodo MOB'
+            WHEN T_MOB > 0 AND K_MOB > 0 AND FFH > 0 THEN 'TELUS MOB + Koodo MOB + FFH'
+      END AS household_product_mix
+FROM `divg-team-v03-pr-de558a.tms_consolidated_reporting.TMS_household_distribution_II`
