@@ -1,0 +1,24 @@
+WITH churn AS (
+  SELECT DISTINCT
+    CAST(cfr_ban AS int64) AS ban,
+    CAST(cfr_subscriber_no AS string) AS subscriber_no,
+    MAX(DATE(cfr_create_date)) AS churn_date,
+    1 AS churn_label
+  FROM `cio-datahub-enterprise-pr-183a.ent_cust_cust.bq_wls_subscr_canc`
+  WHERE DATE(cfr_create_date) > '2024-01-01' # CHANGE THIS
+  AND cfr_reason_cd IN ('ALTS', 'AREA', 'BCWS', 'CHRN', 'CNB1', 'COMP', 'COMV', 'DEC', 'EMPL', 'EQNW', 'EXPE','INPI', 'LMNU', 'LSTL', 'MTMD', 'NETW', 'NORE', 'NREQ', 'NRES', 'PRMO', 'PRTO', 'QOI', 'REVE', 'SEAS', 'TBST')
+  GROUP BY cfr_ban, cfr_subscriber_no),
+
+base_churn AS (
+  SELECT base.*, churn.churn_date, IFNULL(churn.churn_label, 0) AS churn_label
+  FROM `divg-yomna-workbench-pr-cb7a14.DIVGF_385_Migrations_Benefits_and_Drivers.H1_2024_Base` base
+  LEFT JOIN churn ON base.BAN = churn.ban AND CAST(base.SUBSCRIBER_NUM AS STRING) = churn.subscriber_no)
+
+SELECT MIGRATION_TYPE,
+      --  COUNT(DISTINCT SUBSCRIBER_NUM) AS count_subs,
+      --  SUM(churn_label) AS count_churners,
+       CONCAT(CAST(ROUND((SUM(churn_label)/COUNT(DISTINCT SUBSCRIBER_NUM))*100, 2) AS STRING), "%") AS churn_rate_prcnt
+FROM base_churn
+WHERE (churn_date IS NULL) OR (DATE_DIFF(churn_date, MIGRATION_DATE, DAY) <= 365)
+GROUP BY MIGRATION_TYPE
+ORDER BY MIGRATION_TYPE
