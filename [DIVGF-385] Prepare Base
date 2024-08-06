@@ -1,0 +1,92 @@
+CREATE OR REPLACE TABLE `divg-yomna-workbench-pr-cb7a14.DIVGF_385_Migrations_Benefits_and_Drivers.H1_2024_Base` AS
+
+SELECT DISTINCT
+       DATE(CONCAT(CAST(SUBSTR(MIGRATION_DATE, 6, 4) AS INT64),
+                   '-',
+                   CASE SUBSTR(MIGRATION_DATE, 3, 3)
+                    WHEN 'JAN' THEN 1
+                    WHEN 'FEB' THEN 2
+                    WHEN 'MAR' THEN 3
+                    WHEN 'APR' THEN 4
+                    WHEN 'MAY' THEN 5
+                    WHEN 'JUN' THEN 6
+                    WHEN 'JUL' THEN 7
+                    WHEN 'AUG' THEN 8
+                    WHEN 'SEP' THEN 9
+                    WHEN 'OCT' THEN 10
+                    WHEN 'NOV' THEN 11
+                    WHEN 'DEC' THEN 12
+                   END,
+                   '-',
+                   CAST(SUBSTR(MIGRATION_DATE, 1, 2) AS INT64))) AS MIGRATION_DATE,
+       a.BAN,
+       SUBSCRIBER_NUM,
+      --  CONTRACT_STATUS,
+       'Pre2Post' AS MIGRATION_TYPE
+FROM `divg-yomna-workbench-pr-cb7a14.DIVGF_385_Migrations_Benefits_and_Drivers.H1_2024_internal_migrations` a
+-- JOIN `divg-yomna-workbench-pr-cb7a14.DIVGF_385_Migrations_Benefits_and_Drivers.contract_koodo_base_h1_2024` b
+--   ON a.PREV_BAN = b.BAN AND a.PREV_SUBSCRIBER_NUM = b.SUBSCRIBER_NO
+WHERE TRIM(UPPER(prev_level_4)) IN ('TCPR', 'KCPR')
+      AND TRIM(UPPER(level_4)) IN ('TCPO', 'KCPO')
+
+UNION ALL
+
+SELECT DISTINCT
+       DATE(CONCAT(CAST(SUBSTR(MIGRATION_DATE, 6, 4) AS INT64),
+                   '-',
+                   CASE SUBSTR(MIGRATION_DATE, 3, 3)
+                    WHEN 'JAN' THEN 1
+                    WHEN 'FEB' THEN 2
+                    WHEN 'MAR' THEN 3
+                    WHEN 'APR' THEN 4
+                    WHEN 'MAY' THEN 5
+                    WHEN 'JUN' THEN 6
+                    WHEN 'JUL' THEN 7
+                    WHEN 'AUG' THEN 8
+                    WHEN 'SEP' THEN 9
+                    WHEN 'OCT' THEN 10
+                    WHEN 'NOV' THEN 11
+                    WHEN 'DEC' THEN 12
+                   END,
+                   '-',
+                   CAST(SUBSTR(MIGRATION_DATE, 1, 2) AS INT64))) AS MIGRATION_DATE,
+       a.BAN,
+       SUBSCRIBER_NUM,
+      --  CONTRACT_STATUS,
+       'KPost2TPost' AS MIGRATION_TYPE
+FROM `divg-yomna-workbench-pr-cb7a14.DIVGF_385_Migrations_Benefits_and_Drivers.H1_2024_internal_migrations` a
+-- JOIN `divg-yomna-workbench-pr-cb7a14.DIVGF_385_Migrations_Benefits_and_Drivers.contract_koodo_base_h1_2024` b
+--   ON a.PREV_BAN = b.BAN AND a.PREV_SUBSCRIBER_NUM = b.SUBSCRIBER_NO
+WHERE TRIM(UPPER(prev_level_4)) IN ('KCPO')
+      AND TRIM(UPPER(level_4)) IN ('TCPO')
+
+UNION ALL
+
+SELECT DISTINCT
+       DATE(CONCAT(CAST(SUBSTR(MIGRATION_DATE, 6, 4) AS INT64),
+                   '-',
+                   CASE SUBSTR(MIGRATION_DATE, 3, 3)
+                    WHEN 'JAN' THEN 1
+                    WHEN 'FEB' THEN 2
+                    WHEN 'MAR' THEN 3
+                    WHEN 'APR' THEN 4
+                    WHEN 'MAY' THEN 5
+                    WHEN 'JUN' THEN 6
+                    WHEN 'JUL' THEN 7
+                    WHEN 'AUG' THEN 8
+                    WHEN 'SEP' THEN 9
+                    WHEN 'OCT' THEN 10
+                    WHEN 'NOV' THEN 11
+                    WHEN 'DEC' THEN 12
+                   END,
+                   '-',
+                   CAST(SUBSTR(MIGRATION_DATE, 1, 2) AS INT64))) AS MIGRATION_DATE,
+       a.BAN,
+       SUBSCRIBER_NUM,
+      --  CONTRACT_STATUS,
+       'TPost2KPost' AS MIGRATION_TYPE
+FROM `divg-yomna-workbench-pr-cb7a14.DIVGF_385_Migrations_Benefits_and_Drivers.H1_2024_internal_migrations` a
+-- JOIN `divg-yomna-workbench-pr-cb7a14.DIVGF_385_Migrations_Benefits_and_Drivers.contract_koodo_base_h1_2024` b
+--   ON a.PREV_BAN = b.BAN AND a.PREV_SUBSCRIBER_NUM = b.SUBSCRIBER_NO
+WHERE TRIM(UPPER(prev_level_4)) IN ('TCPO')
+      AND TRIM(UPPER(level_4)) IN ('KCPO')
