@@ -1,0 +1,80 @@
+WITH mss_telus_lif as (
+  SELECT
+    CAST(bacct_bus_bacct_num AS int64) AS ban,
+    pi_prod_instnc_resrc_str AS subscriber_no,
+    date(pi_cntrct_end_ts) as cntrct_end_date,
+    CASE
+      WHEN DATE(pi_cntrct_end_ts) = '9999-12-31' or pi_cntrct_end_ts is null THEN 'BYOD'
+      WHEN DATE(pi_cntrct_end_ts) > DATE_ADD('2023-12-31', INTERVAL 720 DAY)  THEN 'T-25 and beyond'
+      WHEN DATE(pi_cntrct_end_ts) >= DATE_ADD('2023-12-31', INTERVAL 390 DAY)
+        and DATE(pi_cntrct_end_ts) <= DATE_ADD('2023-12-31', INTERVAL 720 DAY) THEN 'T-24 to T-13'
+      WHEN DATE(pi_cntrct_end_ts) >= DATE_ADD('2023-12-31', INTERVAL 210 DAY) 
+        and DATE(pi_cntrct_end_ts) < DATE_ADD('2023-12-31', INTERVAL 390 DAY) THEN 'T-12 to T-7'
+      WHEN DATE(pi_cntrct_end_ts) >= DATE_ADD('2023-12-31', INTERVAL 120 DAY) 
+        and DATE(pi_cntrct_end_ts) < DATE_ADD('2023-12-31', INTERVAL 210 DAY) THEN 'T-6 to T-4'
+      WHEN DATE(pi_cntrct_end_ts) >= DATE_SUB('2023-12-31', INTERVAL 30 DAY) 
+        and DATE(pi_cntrct_end_ts) < DATE_ADD('2023-12-31', INTERVAL 120 DAY) THEN 'T-3 to T=0'  
+      WHEN DATE(pi_cntrct_end_ts) >= DATE_SUB('2023-12-31', INTERVAL 120 DAY) 
+        and DATE(pi_cntrct_end_ts) < DATE_SUB('2023-12-31', INTERVAL 30 DAY) THEN 'T+1 to T+3'
+      WHEN DATE(pi_cntrct_end_ts) >= DATE_SUB('2023-12-31', INTERVAL 180 DAY) 
+        and DATE(pi_cntrct_end_ts) < DATE_SUB('2023-12-31', INTERVAL 120 DAY) THEN 'T+4 to T+6'
+      WHEN DATE(pi_cntrct_end_ts) >= DATE_SUB('2023-12-31', INTERVAL 270 DAY) 
+        and DATE(pi_cntrct_end_ts) < DATE_SUB('2023-12-31', INTERVAL 180 DAY) THEN 'T+7 to T+9'
+      WHEN DATE(pi_cntrct_end_ts) < DATE_SUB('2023-12-31', INTERVAL 270 DAY)    THEN 'T+10 and beyond'
+      Else 'n/a'    
+    END AS lifecycl_type
+  FROM `cio-datahub-enterprise-pr-183a.ent_cust_cust.bq_prod_instnc_snpsht`
+  WHERE
+    DATE(prod_instnc_ts) = '2023-12-31'
+    AND bacct_brand_id = 1
+    AND UPPER(pi_prod_instnc_stat_cd)='A'
+    AND UPPER(bacct_bacct_typ_cd)='I'
+    AND UPPER(bacct_bacct_subtyp_cd)='R'
+    AND UPPER(bacct_billg_mthd_cd)='POST'
+    AND bus_prod_instnc_src_id=130
+    AND UPPER(bacct_bacct_stat_cd) IN ('O','S')),
+    
+mss_telus_contract as (
+  SELECT ban, subscriber_no,
+         case
+          when lifecycl_type = 'BYOD' then 'BYOD'
+          when lifecycl_type in ('T-12 to T-7', 'T-24 to T-13', 'T-3 to T=0', 'T-6 to T-4', 'T-25 and beyond') then 'On-Contract'
+          when lifecycl_type in ('T+1 to T+3', 'T+10 and beyond', 'T+4 to T+6', 'T+7 to T+9') then 'MTM'
+          else 'n/a'
+         end as contract_type
+  FROM mss_telus_lif),
+
+t2k_base AS (
+  SELECT DISTINCT
+       DATE(CONCAT(CAST(SUBSTR(MIGRATION_DATE, 6, 4) AS INT64),
+                   '-',
+                   CASE SUBSTR(MIGRATION_DATE, 3, 3)
+                    WHEN 'JAN' THEN 1
+                    WHEN 'FEB' THEN 2
+                    WHEN 'MAR' THEN 3
+                    WHEN 'APR' THEN 4
+                    WHEN 'MAY' THEN 5
+                    WHEN 'JUN' THEN 6
+                    WHEN 'JUL' THEN 7
+                    WHEN 'AUG' THEN 8
+                    WHEN 'SEP' THEN 9
+                    WHEN 'OCT' THEN 10
+                    WHEN 'NOV' THEN 11
+                    WHEN 'DEC' THEN 12
+                   END,
+                   '-',
+                   CAST(SUBSTR(MIGRATION_DATE, 1, 2) AS INT64))) AS MIGRATION_DATE,
+       a.BAN,
+       SUBSCRIBER_NUM,
+       lifecycl_type,
+       'TPost2KPost' AS MIGRATION_TYPE
+FROM `divg-yomna-workbench-pr-cb7a14.DIVGF_385_Migrations_Benefits_and_Drivers.H1_2024_internal_migrations` a
+JOIN mss_telus_lif b
+  ON a.PREV_BAN = b.BAN AND CAST(a.PREV_SUBSCRIBER_NUM AS STRING) = b.SUBSCRIBER_NO
+WHERE TRIM(UPPER(prev_level_4)) IN ('TCPO')
+      AND TRIM(UPPER(level_4)) IN ('KCPO'))
+
+SELECT lifecycl_type, COUNT(*)
+FROM t2k_base
+GROUP BY lifecycl_type
+ORDER BY lifecycl_type
