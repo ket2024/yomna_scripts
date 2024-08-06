@@ -1,0 +1,142 @@
+------------------------------------------- TMS Consolidated Reporting ----------------------------------------
+-- load data from SAS
+-- LOAD DATA OVERWRITE
+--   `divg-team-v03-pr-de558a.tms_consolidated_reporting.tk_post_pre_mp_tms_base_202405`
+-- FROM FILES( format='CSV',
+--     uris = ['gs://divg-team-v03-pr-de558a-default/tms_consolidated_reporting/tk_post_pre_mp_tms_base_202405.csv'] );
+
+-- check data availability
+-- SELECT MAX(DATE(dly_servreq_actvy_sum_ts)) AS renew_date
+-- FROM `cio-datahub-enterprise-pr-183a.ent_cust_cust.bq_dly_servreq_actvy_sum`;
+
+-- SELECT  COUNT(*)
+-- FROM `cio-datahub-enterprise-pr-183a.ent_cust_cust.bq_wls_subscr_canc`
+-- WHERE DATE(cfr_create_date)=CURRENT_DATE()-1;
+
+-- for koodo
+-- check churn&renew
+CREATE OR REPLACE TABLE `divg-team-v03-pr-de558a.tms_consolidated_reporting.tms_churn_renew_kpost_kpre` as
+with tms AS (
+SELECT DISTINCT 
+  CAST(a.ban AS int64) AS ban,
+  CAST(a.SUBSCRIBER_NUM AS string) AS subscriber_no,
+  a.* EXCEPT (ban, SUBSCRIBER_NUM),
+  b.* EXCEPT(BAN)
+FROM `divg-team-v03-pr-de558a.tms_consolidated_reporting.tk_post_pre_mp_tms_base_202405` a # CHANGE THIS -- manually upload base list to gcp
+LEFT JOIN `divg-team-v03-pr-de558a.tms_consolidated_reporting.TMS_household_distribution_III` b
+  ON a.ban = b.BAN
+),
+
+churn as(
+SELECT DISTINCT
+  CAST(cfr_ban AS int64) AS ban,
+  CAST(cfr_subscriber_no AS string) AS subscriber_no,
+  MAX(DATE(cfr_create_date)) AS churn_date,
+  1 AS churn_label
+FROM `cio-datahub-enterprise-pr-183a.ent_cust_cust.bq_wls_subscr_canc`
+WHERE DATE(cfr_create_date) >= '2024-07-08' # CHANGE THIS
+AND DATE(cfr_create_date) <= '2024-07-10' # CHANGE THIS
+AND cfr_reason_cd IN ('ALTS', 'AREA', 'BCWS', 'CHRN', 'CNB1', 'COMP', 'COMV', 'DEC', 'EMPL', 'EQNW', 'EXPE','INPI', 'LMNU',
+                      'LSTL', 'MTMD', 'NETW', 'NORE', 'NREQ', 'NRES', 'PRMO', 'PRTO', 'QOI', 'REVE', 'SEAS', 'TBST')
+GROUP BY cfr_ban, cfr_subscriber_no
+),
+
+
+renew AS (
+SELECT DISTINCT 
+  CAST(bus_bacct_num AS int64) AS ban,
+  CAST(prim_srvc_resrc_str AS string) AS subscriber_no,
+  MAX(DATE(dly_servreq_actvy_sum_ts)) AS renew_date,
+  1 AS renew_label
+FROM `cio-datahub-enterprise-pr-183a.ent_cust_cust.bq_dly_servreq_actvy_sum` 
+WHERE DATE(dly_servreq_actvy_sum_ts) >= '2024-07-08' # CHANGE THIS
+AND DATE(dly_servreq_actvy_sum_ts) <= '2024-07-10' # CHANGE THIS
+AND servreq_event_typ_nm in ('CONTRACT RENEWAL EVENT','HARDWARE UPGRADE EVENT')
+AND bus_bacct_num is not null
+AND bus_bacct_num not in ('N/AVAIL')
+AND prim_srvc_resrc_str is not null	
+GROUP BY bus_bacct_num, prim_srvc_resrc_str
+)	
+
+
+select distinct
+  a.*,
+  b.churn_date,
+  b.churn_label,
+  c.renew_date,
+  c.renew_label,
+  d.label_date AS K2T_date,
+  IF(d.label_date IS NULL, 0, 1) AS K2T_label
+from tms a
+left join churn b
+on a.ban = b.ban
+and a.subscriber_no = b.subscriber_no
+left join renew c
+on a.ban = c.ban
+and a.subscriber_no = c.subscriber_no
+left join `divg-team-v03-pr-de558a.tms_consolidated_reporting.TMS_K2T_July8_to_July10_2024` d # CHANGE THIS -- K2T
+on a.ban = d.ban
+and a.subscriber_no = CAST(d.subscriber_no AS STRING);
+
+
+
+-- generating numbers for reporting
+-- SELECT
+--   household_product_mix,
+--   COUNT(DISTINCT subscriber_no) AS num_subs,
+--   SUM(churn_label) AS churners,
+--   SUM(renew_label) AS renewals,
+--   ROUND((SUM(churn_label)/COUNT(DISTINCT subscriber_no))*100, 2) AS churn_rate_prcnt,
+--   ROUND((SUM(renew_label)/COUNT(DISTINCT subscriber_no))*100, 2) AS renewal_rate_prcnt
+-- FROM `divg-team-v03-pr-de558a.tms_consolidated_reporting.tms_churn_renew_kpost_kpre`
+-- GROUP BY household_product_mix;
+
+--The next 2 queries are only to update the base
+-- SELECT
+--   SEGMENT_ROLLUP_2,
+--   COUNT(DISTINCT subscriber_no) AS num_subs
+-- FROM `divg-team-v03-pr-de558a.tms_consolidated_reporting.tms_churn_renew_kpost_kpre`
+-- GROUP BY SEGMENT_ROLLUP_2;
+
+-- SELECT
+--   SEGMENT_ROLLUP_2, T_MONTH_GP,
+--   COUNT(DISTINCT subscriber_no) AS num_subs
+-- FROM `divg-team-v03-pr-de558a.tms_consolidated_reporting.tms_churn_renew_kpost_kpre`
+-- GROUP BY SEGMENT_ROLLUP_2, T_MONTH_GP;
+
+--Total number is when everything except the segment is commented out. Only postpaid for Koodo and Telus
+select renew_label, count(*)
+from `divg-team-v03-pr-de558a.tms_consolidated_reporting.tms_churn_renew_kpost_kpre` 
+where renew_label=1
+      AND SEGMENT_ROLLUP_2 = 'TELUS CONSUMER POSTPAID'
+      -- AND SEGMENT_ROLLUP_2 = 'TELUS CONSUMER PREPAID'
+      -- AND SEGMENT_ROLLUP_2 = 'KOODO PREPAID'
+      -- AND SEGMENT_ROLLUP_2 = 'KOODO POSTPAID'
+      AND T_MONTH_GP IN ('MTM&BYOD')
+      -- AND T_MONTH_GP IN ('Expiring (T-6 - T-4)', 'Expiring (T-3 - T-1)')
+      -- AND T_MONTH_GP IN ('> 6 months')
+group by 1;
+
+select churn_label, count(*)
+from `divg-team-v03-pr-de558a.tms_consolidated_reporting.tms_churn_renew_kpost_kpre` 
+where churn_label=1
+      AND SEGMENT_ROLLUP_2 = 'TELUS CONSUMER POSTPAID'
+      -- AND SEGMENT_ROLLUP_2 = 'TELUS CONSUMER PREPAID'
+      -- AND SEGMENT_ROLLUP_2 = 'KOODO PREPAID'
+      -- AND SEGMENT_ROLLUP_2 = 'KOODO POSTPAID'
+      AND T_MONTH_GP IN ('MTM&BYOD')
+      -- AND T_MONTH_GP IN ('Expiring (T-6 - T-4)', 'Expiring (T-3 - T-1)')
+      -- AND T_MONTH_GP IN ('> 6 months')
+group by 1;
+
+-- select K2T_label, count(*)
+-- from `divg-team-v03-pr-de558a.tms_consolidated_reporting.tms_churn_renew_kpost_kpre` 
+-- where K2T_label=1
+--       AND SEGMENT_ROLLUP_2 = 'TELUS CONSUMER POSTPAID'
+      -- AND SEGMENT_ROLLUP_2 = 'TELUS CONSUMER PREPAID'
+      -- AND SEGMENT_ROLLUP_2 = 'KOODO PREPAID'
+      -- AND SEGMENT_ROLLUP_2 = 'KOODO POSTPAID'
+      -- AND T_MONTH_GP IN ('MTM&BYOD')
+      -- AND T_MONTH_GP IN ('Expiring (T-6 - T-4)', 'Expiring (T-3 - T-1)')
+      -- AND T_MONTH_GP IN ('> 6 months')
+-- group by 1;
