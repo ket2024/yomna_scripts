@@ -1,0 +1,61 @@
+(SELECT '2024-04' AS port_out_month, new_brand, COUNT(*) AS number_of_port_outs
+FROM (
+  SELECT 
+    CAST(tms_base.ban AS INT64) AS ban,
+    CAST(tms_base.SUBSCRIBER_NUM AS STRING) AS subscriber_no,
+    previous_brand,
+    new_brand
+  FROM `divg-team-v03-pr-de558a.tms_consolidated_reporting.tk_post_pre_mp_tms_base_202404` AS tms_base
+  LEFT JOIN `divg-team-v03-pr-de558a.tms_consolidated_reporting.TMS_port_outs_April_to_July_2024` AS port_outs
+    ON CAST(tms_base.SUBSCRIBER_NUM AS STRING) = port_outs.subscriber_no
+  WHERE port_outs.migration_date >= '2024-04-01' AND port_outs.migration_date <= '2024-04-30')
+GROUP BY new_brand
+ORDER BY new_brand)
+
+UNION ALL
+
+(SELECT '2024-05' AS port_out_month, new_brand, COUNT(*) AS number_of_port_outs
+FROM (
+  SELECT 
+    CAST(tms_base.ban AS INT64) AS ban,
+    CAST(tms_base.SUBSCRIBER_NUM AS STRING) AS subscriber_no,
+    previous_brand,
+    new_brand
+  FROM `divg-team-v03-pr-de558a.tms_consolidated_reporting.tk_post_pre_mp_tms_base_202405` AS tms_base
+  LEFT JOIN `divg-team-v03-pr-de558a.tms_consolidated_reporting.TMS_port_outs_April_to_July_2024` AS port_outs
+    ON CAST(tms_base.SUBSCRIBER_NUM AS STRING) = port_outs.subscriber_no
+  WHERE port_outs.migration_date >= '2024-05-01' AND port_outs.migration_date <= '2024-05-31')
+GROUP BY new_brand
+ORDER BY new_brand)
+
+UNION ALL
+
+(SELECT '2024-06' AS port_out_month, new_brand, COUNT(*) AS number_of_port_outs
+FROM (
+  SELECT 
+    CAST(tms_base.ban AS INT64) AS ban,
+    CAST(tms_base.SUBSCRIBER_NUM AS STRING) AS subscriber_no,
+    previous_brand,
+    new_brand
+  FROM `divg-team-v03-pr-de558a.tms_consolidated_reporting.tk_post_pre_mp_tms_base_202406` AS tms_base
+  LEFT JOIN `divg-team-v03-pr-de558a.tms_consolidated_reporting.TMS_port_outs_April_to_July_2024` AS port_outs
+    ON CAST(tms_base.SUBSCRIBER_NUM AS STRING) = port_outs.subscriber_no
+  WHERE port_outs.migration_date >= '2024-06-01' AND port_outs.migration_date <= '2024-06-30')
+GROUP BY new_brand
+ORDER BY new_brand)
+
+UNION ALL
+
+(SELECT '2024-07' AS port_out_month, new_brand, COUNT(*) AS number_of_port_outs
+FROM (
+  SELECT 
+    CAST(tms_base.ban AS INT64) AS ban,
+    CAST(tms_base.SUBSCRIBER_NUM AS STRING) AS subscriber_no,
+    previous_brand,
+    new_brand
+  FROM `divg-team-v03-pr-de558a.tms_consolidated_reporting.tk_post_pre_mp_tms_base_202406` AS tms_base
+  LEFT JOIN `divg-team-v03-pr-de558a.tms_consolidated_reporting.TMS_port_outs_April_to_July_2024` AS port_outs
+    ON CAST(tms_base.SUBSCRIBER_NUM AS STRING) = port_outs.subscriber_no
+  WHERE port_outs.migration_date >= '2024-07-01' AND port_outs.migration_date <= '2024-07-31')
+GROUP BY new_brand
+ORDER BY new_brand)
