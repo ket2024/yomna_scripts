@@ -1,0 +1,156 @@
+  WITH active_base AS (
+  SELECT * EXCEPT(row_rank)
+  FROM (SELECT
+          bacct_bus_bacct_num AS ban,
+          pi_prod_instnc_resrc_str AS subscriber_no,
+          DATE(pi_actvn_ts) AS activation_date,
+          CASE
+            WHEN pp_recur_chrg_amt < 5 THEN 'Below $5'
+            WHEN (pp_recur_chrg_amt >= 5 AND pp_recur_chrg_amt < 10) THEN '$5-9.99'
+            WHEN (pp_recur_chrg_amt >= 10 AND pp_recur_chrg_amt < 15) THEN '$10-14.99'
+            WHEN (pp_recur_chrg_amt >= 15 AND pp_recur_chrg_amt < 20) THEN '$15-19.99'
+            WHEN (pp_recur_chrg_amt >= 20 AND pp_recur_chrg_amt < 25) THEN '$20-24.99'
+            WHEN (pp_recur_chrg_amt >= 25 AND pp_recur_chrg_amt < 30) THEN '$25-29.99'
+            WHEN (pp_recur_chrg_amt >= 30 AND pp_recur_chrg_amt < 35) THEN '$30-34.99'
+            WHEN (pp_recur_chrg_amt >= 35 AND pp_recur_chrg_amt < 40) THEN '$35-39.99'
+            WHEN (pp_recur_chrg_amt >= 40 AND pp_recur_chrg_amt < 45) THEN '$40-44.99'
+            WHEN (pp_recur_chrg_amt >= 45 AND pp_recur_chrg_amt < 50) THEN '$45-49.99'
+            WHEN (pp_recur_chrg_amt >= 50 AND pp_recur_chrg_amt < 55) THEN '$50-54.99'
+            WHEN (pp_recur_chrg_amt >= 55 AND pp_recur_chrg_amt < 60) THEN '$55-59.99'
+            WHEN (pp_recur_chrg_amt >= 60 AND pp_recur_chrg_amt < 65) THEN '$60-64.99'
+            WHEN (pp_recur_chrg_amt >= 65 AND pp_recur_chrg_amt < 70) THEN '$65-69.99'
+            WHEN (pp_recur_chrg_amt >= 70 AND pp_recur_chrg_amt < 75) THEN '$70-74.99'
+            WHEN (pp_recur_chrg_amt >= 75 AND pp_recur_chrg_amt < 80) THEN '$75-79.99'
+            WHEN (pp_recur_chrg_amt >= 80 AND pp_recur_chrg_amt < 85) THEN '$80-84.99'
+            WHEN (pp_recur_chrg_amt >= 85 AND pp_recur_chrg_amt < 90) THEN '$85-89.99'
+            WHEN (pp_recur_chrg_amt >= 90 AND pp_recur_chrg_amt < 95) THEN '$90-94.99'
+            WHEN (pp_recur_chrg_amt >= 95 AND pp_recur_chrg_amt < 100) THEN '$95-99.99'
+            WHEN pp_recur_chrg_amt >= 100 THEN 'Above $100'
+            ELSE 'N/A'
+          END AS mrc_category,
+          pp_recur_chrg_amt AS mrc,
+          CASE
+            WHEN bacct_brand_id = 1 THEN 'TELUS'
+            WHEN bacct_brand_id = 3 THEN 'Koodo'
+          END AS brand,
+          RANK() OVER(PARTITION BY bacct_bus_bacct_num, pi_prod_instnc_resrc_str ORDER BY
+                      pi_actvn_ts DESC, bus_prod_instnc_id DESC, prod_instnc_ts DESC) AS row_rank
+         FROM `cio-datahub-enterprise-pr-183a.ent_cust_cust.bq_prod_instnc_snpsht`
+         WHERE bacct_brand_id IN (1, 3)
+              AND prod_instnc_ts >= '2023-01-01' # CHANGE THIS
+              AND prod_instnc_ts <= '2023-06-30' # CHANGE THIS
+              AND UPPER(pi_prod_instnc_stat_cd) = 'A'
+              AND UPPER(bacct_bacct_typ_cd) = 'I'
+              AND UPPER(bacct_bacct_subtyp_cd) = 'R'
+              AND UPPER(bacct_billg_mthd_cd) = 'POST'
+              AND bus_prod_instnc_src_id = 130
+              AND UPPER(bacct_bacct_stat_cd) IN ('O', 'S'))
+    WHERE row_rank = 1),
+
+  active_base_before AS (
+  SELECT
+    bacct_bus_bacct_num AS ban,
+    COUNT(pi_prod_instnc_resrc_str) AS subscribers_count_before
+  FROM
+    `cio-datahub-enterprise-pr-183a.ent_cust_cust.bq_prod_instnc_snpsht`
+  WHERE
+    bacct_brand_id IN (1, 3)
+    AND CAST(prod_instnc_ts AS DATE) = '2022-12-31' # CHANGE THIS
+    AND UPPER(pi_prod_instnc_stat_cd) = 'A'
+    AND UPPER(bacct_bacct_typ_cd) = 'I'
+    AND UPPER(bacct_bacct_subtyp_cd) = 'R'
+    AND UPPER(bacct_billg_mthd_cd) = 'POST'
+    AND bus_prod_instnc_src_id = 130
+    AND UPPER(bacct_bacct_stat_cd) IN ('O',
+      'S')
+  GROUP BY ban),
+
+  active_base_after AS (
+  SELECT
+    bacct_bus_bacct_num AS ban,
+    COUNT(pi_prod_instnc_resrc_str) AS subscribers_count_after
+  FROM
+    `cio-datahub-enterprise-pr-183a.ent_cust_cust.bq_prod_instnc_snpsht`
+  WHERE
+    bacct_brand_id IN (1, 3)
+    AND CAST(prod_instnc_ts AS DATE) = '2023-07-01' # CHANGE THIS
+    AND UPPER(pi_prod_instnc_stat_cd) = 'A'
+    AND UPPER(bacct_bacct_typ_cd) = 'I'
+    AND UPPER(bacct_bacct_subtyp_cd) = 'R'
+    AND UPPER(bacct_billg_mthd_cd) = 'POST'
+    AND bus_prod_instnc_src_id = 130
+    AND UPPER(bacct_bacct_stat_cd) IN ('O',
+      'S')
+  GROUP BY ban),
+
+  aal_label AS (
+    SELECT active_base_before.ban,
+           1 AS label
+    FROM active_base_before
+    JOIN active_base_after ON active_base_before.ban = active_base_after.ban
+    WHERE active_base_after.subscribers_count_after > active_base_before.subscribers_count_before
+  ),
+
+  aal_base AS (
+    SELECT
+      active_base.*,
+       RANK() OVER(PARTITION BY active_base.ban ORDER BY active_base.activation_date) AS line
+    FROM active_base
+    INNER JOIN aal_label ON active_base.ban = aal_label.ban
+    WHERE active_base.mrc_category NOT IN ('N/A', 'Below $5','$5-9.99','$10-14.99')
+          -- AND DATE_DIFF('2023-07-01', active_base.activation_date, DAY) > 30 # CHANGE THIS
+    ),
+
+  churn AS (
+  SELECT DISTINCT
+    CAST(cfr_ban AS int64) AS ban,
+    CAST(cfr_subscriber_no AS string) AS subscriber_no,
+    MAX(DATE(cfr_create_date)) AS churn_date,
+    1 AS churn_label
+  FROM `cio-datahub-enterprise-pr-183a.ent_cust_cust.bq_wls_subscr_canc`
+  WHERE DATE(cfr_create_date) > '2022-12-31' # CHANGE THIS
+  AND DATE(cfr_create_date) < '2023-07-01' # CHANGE THIS
+  AND cfr_reason_cd IN ('ALTS', 'AREA', 'BCWS', 'CHRN', 'CNB1', 'COMP', 'COMV', 'DEC', 'EMPL', 'EQNW', 'EXPE','INPI', 'LMNU', 'LSTL', 'MTMD', 'NETW', 'NORE', 'NREQ', 'NRES', 'PRMO', 'PRTO', 'QOI', 'REVE', 'SEAS', 'TBST')
+  GROUP BY cfr_ban, cfr_subscriber_no),
+
+  aal_churn AS (
+  SELECT
+    aal_base.* EXCEPT(line),
+    CASE
+      WHEN line <= 4 THEN CAST(line AS STRING)
+      ELSE '>= 5'
+    END AS line,
+    churn.churn_date,
+    IFNULL(churn.churn_label, 0) AS churn_label
+  FROM aal_base
+  LEFT JOIN churn ON aal_base.ban = churn.ban AND aal_base.subscriber_no = churn.subscriber_no)
+
+-- REQUEST #1: YoY H1 MRC for AALs split by Koodo and TELUS
+-- SELECT brand, mrc_category, COUNT(DISTINCT subscriber_no) AS count_subs
+-- FROM aal_base
+-- GROUP BY brand, mrc_category
+-- ORDER BY brand, mrc_category
+
+-- REQUEST #2: Churn for AAL
+SELECT
+  brand,
+  line,
+  -- mrc_category,
+  -- COUNT(DISTINCT subscriber_no) AS count_subs,
+  -- SUM(churn_label) AS count_churners,
+  CONCAT(CAST(ROUND((SUM(churn_label)/COUNT(DISTINCT subscriber_no))*100, 2) AS STRING), "%") AS churn_rate_prcnt
+FROM aal_churn
+GROUP BY  
+  brand 
+  , line
+  -- , mrc_category
+ORDER BY  
+  brand 
+  , line
+  -- , mrc_category
+
+-- REQUEST #3: Average MRC
+-- SELECT brand, AVG(mrc) AS avg_mrc
+-- FROM aal_base
+-- GROUP BY brand
+-- ORDER BY brand
